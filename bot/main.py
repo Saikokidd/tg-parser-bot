@@ -7,15 +7,14 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
 
 from bot.db.connection import get_pool, close_pool
-from bot.handlers import commands, admin, input as input_handler
+from bot.handlers import commands, admin, military, relatives, probiv
 from bot.middlewares.access import AccessMiddleware
 
 load_dotenv()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
+from bot.utils.logging_config import setup_logging
+setup_logging()
+
 logger = logging.getLogger(__name__)
 
 
@@ -23,14 +22,17 @@ async def main():
     bot = Bot(token=os.getenv("BOT_TOKEN"))
     dp = Dispatcher(storage=MemoryStorage())
 
-    # Middleware проверки доступа на всех апдейтах
+    # Middleware на все апдейты
     dp.message.middleware(AccessMiddleware())
     dp.callback_query.middleware(AccessMiddleware())
 
-    # Роутеры (порядок важен: admin → commands → input)
+    # Роутеры (порядок: admin → military → relatives → commands)
     dp.include_router(admin.router)
+    dp.include_router(military.router)
+    dp.include_router(relatives.router)
+    dp.include_router(probiv.router)
     dp.include_router(commands.router)
-    dp.include_router(input_handler.router)
+    
 
     await get_pool()
     logger.info("Database pool initialized")

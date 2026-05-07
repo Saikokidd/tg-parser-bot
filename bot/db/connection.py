@@ -1,10 +1,21 @@
 import os
+import json
 import asyncpg
 from dotenv import load_dotenv
 
 load_dotenv()
 
 _pool = None
+
+
+async def _init_connection(conn: asyncpg.Connection):
+    """Регистрируем кодек для JSONB чтобы работать с dict напрямую"""
+    await conn.set_type_codec(
+        'jsonb',
+        encoder=json.dumps,
+        decoder=json.loads,
+        schema='pg_catalog'
+    )
 
 
 async def get_pool() -> asyncpg.Pool:
@@ -18,6 +29,7 @@ async def get_pool() -> asyncpg.Pool:
             password=os.getenv("POSTGRES_PASSWORD"),
             min_size=1,
             max_size=10,
+            init=_init_connection,
         )
     return _pool
 

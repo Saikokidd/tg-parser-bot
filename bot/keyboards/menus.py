@@ -4,12 +4,16 @@ from aiogram.types import (
 )
 
 
-# ============== ГЛАВНОЕ МЕНЮ ==============
+# ════════════════════════════════════════════════════════════
+#                    ГЛАВНОЕ МЕНЮ
+# ════════════════════════════════════════════════════════════
 
 def main_menu(is_admin: bool = False) -> ReplyKeyboardMarkup:
     """Главное меню (reply-клавиатура)"""
     rows = [
-        [KeyboardButton(text="📝 Внести запись")],
+        [KeyboardButton(text="🔍 Пробить военного")],
+        [KeyboardButton(text="✍️ Заполнить родственников")],
+        [KeyboardButton(text="📋 Без родственников")],
         [KeyboardButton(text="📊 Моя база")],
     ]
     if is_admin:
@@ -18,21 +22,21 @@ def main_menu(is_admin: bool = False) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=rows,
         resize_keyboard=True,
-        input_field_placeholder="Выберите действие или отправьте данные..."
+        input_field_placeholder="Выберите действие..."
     )
 
 
-# ============== АДМИН: УПРАВЛЕНИЕ ==============
+# ════════════════════════════════════════════════════════════
+#                    АДМИН: УПРАВЛЕНИЕ
+# ════════════════════════════════════════════════════════════
 
 def admin_menu() -> InlineKeyboardMarkup:
-    """Меню управления ботом для админа"""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👥 Менеджеры", callback_data="admin:managers")],
     ])
 
 
 def managers_menu() -> InlineKeyboardMarkup:
-    """Меню управления менеджерами"""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить менеджера", callback_data="mgr:add")],
         [InlineKeyboardButton(text="🔄 Изменить ID менеджера", callback_data="mgr:edit_id")],
@@ -55,10 +59,7 @@ def cancel_kb() -> InlineKeyboardMarkup:
 
 
 def managers_list_kb(managers: list, action: str) -> InlineKeyboardMarkup:
-    """
-    Список менеджеров кнопками для выбора.
-    action: 'edit_id' | 'delete'
-    """
+    """Список менеджеров кнопками. action: 'edit_id' | 'delete'"""
     rows = []
     for m in managers:
         rows.append([
@@ -80,12 +81,114 @@ def confirm_delete_kb(manager_id: int) -> InlineKeyboardMarkup:
     ])
 
 
-# ============== ПОДТВЕРЖДЕНИЕ ЗАПИСИ ==============
+# ════════════════════════════════════════════════════════════
+#         ВОЕННЫЙ: ПОДТВЕРЖДЕНИЕ ЗАПИСИ + СБОР РОДСТВЕННИКОВ
+# ════════════════════════════════════════════════════════════
 
-def confirm_record_kb() -> InlineKeyboardMarkup:
+def confirm_military_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Добавить", callback_data="confirm_add"),
-            InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add"),
+            InlineKeyboardButton(text="✅ Сохранить", callback_data="mil:save"),
+            InlineKeyboardButton(text="❌ Отменить", callback_data="mil:cancel"),
         ]
     ])
+
+
+def confirm_military_with_dups_kb() -> InlineKeyboardMarkup:
+    """Когда есть дубли — отдельные тексты на кнопках"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Всё равно сохранить", callback_data="mil:save"),
+            InlineKeyboardButton(text="❌ Отменить", callback_data="mil:cancel"),
+        ]
+    ])
+
+
+def ask_relatives_kb(military_id: int) -> InlineKeyboardMarkup:
+    """После сохранения военного — спросить про родственников"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✍️ Внести родственников сейчас",
+                              callback_data=f"rel:start:{military_id}")],
+        [InlineKeyboardButton(text="⏭ Позже",
+                              callback_data=f"rel:later:{military_id}")],
+    ])
+
+
+# ════════════════════════════════════════════════════════════
+#         РОДСТВЕННИК: ВЫБОР ВОЕННОГО + ПОДТВЕРЖДЕНИЕ
+# ════════════════════════════════════════════════════════════
+
+def military_list_kb(records: list, action: str = "rel:pick") -> InlineKeyboardMarkup:
+    """Список военных кнопками для выбора"""
+    rows = []
+    for r in records:
+        birth = r.get('birth_date')
+        birth_str = birth.strftime('%d.%m.%Y') if birth else '—'
+        label = f"{r['full_name']} • {birth_str}"
+        if len(label) > 60:
+            label = label[:57] + "..."
+        rows.append([
+            InlineKeyboardButton(text=label, callback_data=f"{action}:{r['id']}")
+        ])
+    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def confirm_relative_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Сохранить", callback_data="rel:save"),
+            InlineKeyboardButton(text="❌ Отменить", callback_data="rel:cancel"),
+        ]
+    ])
+
+
+def add_more_relatives_kb(military_id: int) -> InlineKeyboardMarkup:
+    """После сохранения родственника — спросить добавить ещё"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Добавить ещё родственника",
+                              callback_data=f"rel:more:{military_id}")],
+        [InlineKeyboardButton(text="✅ Готово",
+                              callback_data="rel:done")],
+    ])
+    
+
+# ════════════════════════════════════════════════════════════
+#                       ПРОБИВ
+# ════════════════════════════════════════════════════════════
+
+def probiv_persons_kb(blocks: list[dict]) -> InlineKeyboardMarkup:
+    """
+    Список людей из 'возможных связей' кнопками.
+    Каждая кнопка → пробить этого человека дальше.
+    Дедуплицируем по (ФИО + ДР) чтобы один человек не дублировался между годами.
+    """
+    seen = set()
+    rows = []
+    idx = 0  # короткий ID для callback_data (Telegram лимит 64 байта)
+
+    for block in blocks:
+        for p in block["persons"]:
+            key = f"{p['full_name']}|{p['birth_date_str']}"
+            if key in seen:
+                continue
+            seen.add(key)
+
+            label = p["full_name"]
+            if p["birth_date_str"]:
+                label += f" • {p['birth_date_str']}"
+            if len(label) > 60:
+                label = label[:57] + "..."
+
+            rows.append([
+                InlineKeyboardButton(
+                    text=f"🔍 {label}",
+                    callback_data=f"probiv:next:{idx}"
+                )
+            ])
+            idx += 1
+
+    rows.append([
+        InlineKeyboardButton(text="✅ Готово", callback_data="probiv:done")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
