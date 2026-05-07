@@ -35,7 +35,7 @@ class MilitaryStates(StatesGroup):
 
 # ──────────── ВХОД ПО КНОПКЕ ────────────
 
-@router.message(F.text == "🔍 Пробить военного")
+@router.message(F.text == "🔍 Пробить ")
 async def btn_probivat(message: Message, state: FSMContext, manager: dict | None):
     if not manager:
         await message.answer(
@@ -46,16 +46,13 @@ async def btn_probivat(message: Message, state: FSMContext, manager: dict | None
 
     await state.set_state(MilitaryStates.waiting_template)
     await message.answer(
-        "📝 *Шаблон военного:*\n\n"
-        "```\n"
+        "*Шаблон:*\n\n"
         "ФИО: \n"
         "ДР: \n"
         "Б/Ч: \n"
         "Позывной: \n"
         "Статус: \n"
         "Доп инфа: \n"
-        "```\n\n"
-        "Скопируйте, заполните и отправьте.\n"
         "_Обязательные поля: ФИО и Статус (погиб / пропал)._",
         parse_mode="Markdown"
     )
@@ -87,7 +84,7 @@ async def receive_template(message: Message, state: FSMContext, manager: dict):
     if duplicates:
         dup_text = "\n\n".join([format_military_record(d) for d in duplicates])
         text = (
-            f"⚠️ *Найдены похожие записи ({len(duplicates)} шт.):*\n\n"
+            f"*Найдены похожие записи ({len(duplicates)} шт.):*\n\n"
             f"{dup_text}\n\n"
             f"━━━━━━━━━━━━━━━\n"
             f"{format_military(parsed)}\n\n"
@@ -113,7 +110,7 @@ async def save_military(callback: CallbackQuery, state: FSMContext):
     record = await insert_military(parsed, manager_id)
 
     await callback.message.edit_text(
-        f"✅ *Военный сохранён!*\n\n{format_military(parsed)}",
+        f"✅ *Сохранено*\n\n{format_military(parsed)}",
         parse_mode="Markdown"
     )
 
@@ -132,7 +129,7 @@ async def save_military(callback: CallbackQuery, state: FSMContext):
 
     # Предлагаем внести родственников вручную
     await callback.message.answer(
-        "👨‍👩‍👧 Вносим родственников этого военного сейчас?",
+        "Заполнить ?",
         reply_markup=ask_relatives_kb(record['id'])
     )
 
@@ -151,8 +148,7 @@ async def relatives_later(callback: CallbackQuery):
     military_id = int(callback.data.split(":")[2])
     await mark_relatives_collected(military_id, value=False)
     await callback.message.edit_text(
-        "⏭ Хорошо. Военный отмечен в списке *«Без родственников»* — "
-        "сможете вернуться к нему позже.",
+        "⏭ Хорошо.",
         parse_mode="Markdown"
     )
 
@@ -163,8 +159,8 @@ async def relatives_later(callback: CallbackQuery):
 async def btn_my_base(message: Message, manager: dict | None):
     if not manager:
         await message.answer(
-            "ℹ️ У вас нет личной базы — вы администратор без записей.\n"
-            "Чтобы вносить данные, попросите добавить себя в БД как менеджера."
+            "ℹ️ У вас нет личной базы.\n"
+            "Маякни айтишнику."
         )
         return
 
@@ -178,9 +174,9 @@ async def btn_my_base(message: Message, manager: dict | None):
 
     await message.answer(
         f"📊 База менеджера *{manager['name']}*:\n\n"
-        f"Всего военных: *{len(records)}*\n"
-        f"С собранными родственниками: *{with_relatives}*\n"
-        f"Осталось обработать: *{len(records) - with_relatives}*",
+        f"Всего: *{len(records)}*\n"
+        f"Заполнены: *{with_relatives}*\n"
+        f"Осталось: *{len(records) - with_relatives}*",
         parse_mode="Markdown"
     )
 
@@ -193,7 +189,7 @@ async def btn_without_relatives(message: Message, manager: dict | None):
 
     records = await list_military_without_relatives(manager_id=manager['id'])
     if not records:
-        await message.answer("✅ Все военные обработаны — родственники собраны по всем!")
+        await message.answer("✅ Все заполненно")
         return
 
     lines = [f"📋 *Военные без родственников ({len(records)}):*\n"]
@@ -205,6 +201,6 @@ async def btn_without_relatives(message: Message, manager: dict | None):
     if len(records) > 30:
         lines.append(f"\n_...и ещё {len(records) - 30}_")
 
-    lines.append("\nЧтобы внести родственников — нажмите *✍️ Заполнить родственников*.")
+    lines.append("\nнажмите *Заполнить")
 
     await message.answer("\n".join(lines), parse_mode="Markdown")

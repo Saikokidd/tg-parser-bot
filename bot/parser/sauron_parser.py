@@ -120,14 +120,14 @@ def format_address_relations(blocks: list[dict]) -> str:
     if not blocks:
         return "🔍 По этому человеку *возможных связей по адресу* в ответе API нет."
 
-    lines = ["🔍 *Возможные связи по адресу:*\n"]
+    lines = ["Возможные связи по адресу:\n"]
     for block in blocks:
-        lines.append(f"📅 *{block['source']}*")
+        lines.append(f"{block['source']}")
         if block.get("address"):
-            lines.append(f"🏠 {block['address']}")
+            lines.append(f"{block['address']}")
         for p in block["persons"]:
             birth = f" • {p['birth_date_str']}" if p["birth_date_str"] else ""
-            lines.append(f"  👤 {p['full_name']}{birth}")
+            lines.append(f"{p['full_name']}{birth}")
         lines.append("")  # пустая строка между блоками
 
     return "\n".join(lines).strip()
@@ -251,7 +251,7 @@ def format_relative_template(template: dict) -> str:
         return "❌ Не удалось собрать данные родственника из ответа API."
 
     lines = [
-        "📋 *Шаблон родственника (по данным пробива):*",
+        "Шаблон(не всё обязательно):",
         "",
         "```",
         f"ФИО: {template.get('full_name', '')}",
@@ -264,6 +264,6 @@ def format_relative_template(template: dict) -> str:
         f"Почта: {template.get('email', '')}",
         "```",
         "",
-        "_Скопируйте, проверьте и внесите через кнопку «✍️ Заполнить родственников»._"
+        "_Внесите через кнопку «Заполнить»._"
     ]
     return "\n".join(lines)

@@ -145,25 +145,25 @@ def validate_military(data: dict) -> Optional[str]:
 # ────────── Форматирование для показа ──────────
 
 STATUS_LABELS = {
-    'killed':  '☠️ Погиб',
-    'missing': '❓ Пропал без вести',
+    'killed':  'Погиб',
+    'missing': 'Пропал',
 }
 
 
 def format_military(data: dict) -> str:
     """Отформатировать распарсенного военного для показа менеджеру"""
-    lines = ["📋 *Распознано (военный):*\n"]
-    lines.append(f"👤 ФИО: {data.get('full_name', '—')}")
-    lines.append(f"🎂 ДР: {data['birth_date'].strftime('%d.%m.%Y') if data.get('birth_date') else '—'}")
+    lines = ["Распознано:\n"]
+    lines.append(f"ФИО: {data.get('full_name', '—')}")
+    lines.append(f"ДР: {data['birth_date'].strftime('%d.%m.%Y') if data.get('birth_date') else '—'}")
 
     status = data.get('status')
     lines.append(f"⚐ Статус: {STATUS_LABELS.get(status, '—')}")
 
     extra = data.get('extra', {})
-    lines.append(f"🏠 Б/Ч: {extra.get('unit', '—')}")
-    lines.append(f"🎖 Позывной: {extra.get('callsign', '—')}")
+    lines.append(f"Б/Ч: {extra.get('unit', '—')}")
+    lines.append(f"Позывной: {extra.get('callsign', '—')}")
     if extra.get('note'):
-        lines.append(f"📝 Доп.инфа: {extra['note']}")
+        lines.append(f"Доп.инфа: {extra['note']}")
 
     return "\n".join(lines)
 
@@ -176,9 +176,9 @@ def format_military_record(record: dict) -> str:
     status_label = STATUS_LABELS.get(record.get('status'), '—')
 
     parts = [
-        f"👤 {record.get('full_name', '—')}",
-        f"🎂 {birth_str} | {status_label}",
+        f"{record.get('full_name', '—')}",
+        f"{birth_str} | {status_label}",
     ]
     if extra.get('unit') or extra.get('callsign'):
-        parts.append(f"🏠 Б/Ч: {extra.get('unit', '—')} | 🎖 {extra.get('callsign', '—')}")
+        parts.append(f"Б/Ч: {extra.get('unit', '—')} | 🎖 {extra.get('callsign', '—')}")
     return "\n".join(parts)

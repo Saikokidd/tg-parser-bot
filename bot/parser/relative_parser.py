@@ -145,21 +145,21 @@ def validate_relative(data: dict) -> Optional[str]:
 # ────────── Форматирование ──────────
 
 def format_relative(data: dict) -> str:
-    lines = ["📋 *Распознано (родственник):*\n"]
-    lines.append(f"👤 ФИО: {data.get('full_name', '—')}")
-    lines.append(f"🎂 ДР: {data['birth_date'].strftime('%d.%m.%Y') if data.get('birth_date') else '—'}")
-    lines.append(f"🏠 Адрес: {data.get('address', '—')}")
-    lines.append(f"📞 Телефон: {data.get('phone', '—')}")
+    lines = ["Распознано:\n"]
+    lines.append(f"ФИО: {data.get('full_name', '—')}")
+    lines.append(f"ДР: {data['birth_date'].strftime('%d.%m.%Y') if data.get('birth_date') else '—'}")
+    lines.append(f"Адрес: {data.get('address', '—')}")
+    lines.append(f"Телефон: {data.get('phone', '—')}")
 
     extra = data.get('extra', {})
     if extra.get('snils'):
-        lines.append(f"🆔 СНИЛС: {extra['snils']}")
+        lines.append(f"СНИЛС: {extra['snils']}")
     if extra.get('inn'):
-        lines.append(f"🆔 ИНН: {extra['inn']}")
+        lines.append(f"ИНН: {extra['inn']}")
     if extra.get('passport'):
-        lines.append(f"🆔 Паспорт: {extra['passport']}")
+        lines.append(f"Паспорт: {extra['passport']}")
     if extra.get('email'):
-        lines.append(f"📧 Почта: {extra['email']}")
+        lines.append(f"Почта: {extra['email']}")
 
     return "\n".join(lines)
 
@@ -169,7 +169,7 @@ def format_relative_record(record: dict) -> str:
     birth = record.get('birth_date')
     birth_str = birth.strftime('%d.%m.%Y') if birth else '—'
     return (
-        f"👤 {record.get('full_name', '—')}\n"
-        f"🎂 {birth_str} | 📞 {record.get('phone', '—')}\n"
-        f"🏠 {record.get('address', '—')}"
+        f"{record.get('full_name', '—')}\n"
+        f"{birth_str} | 📞 {record.get('phone', '—')}\n"
+        f"{record.get('address', '—')}"
     )

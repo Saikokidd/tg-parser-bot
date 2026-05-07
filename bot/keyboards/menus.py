@@ -11,9 +11,9 @@ from aiogram.types import (
 def main_menu(is_admin: bool = False) -> ReplyKeyboardMarkup:
     """Главное меню (reply-клавиатура)"""
     rows = [
-        [KeyboardButton(text="🔍 Пробить военного")],
-        [KeyboardButton(text="✍️ Заполнить родственников")],
-        [KeyboardButton(text="📋 Без родственников")],
+        [KeyboardButton(text="🔍 Пробить")],
+        [KeyboardButton(text="✍️ Заполнить")],
+        [KeyboardButton(text="📋 Не заполнены")],
         [KeyboardButton(text="📊 Моя база")],
     ]
     if is_admin:
@@ -107,7 +107,7 @@ def confirm_military_with_dups_kb() -> InlineKeyboardMarkup:
 def ask_relatives_kb(military_id: int) -> InlineKeyboardMarkup:
     """После сохранения военного — спросить про родственников"""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✍️ Внести родственников сейчас",
+        [InlineKeyboardButton(text="✍️ Заополнить сейчас",
                               callback_data=f"rel:start:{military_id}")],
         [InlineKeyboardButton(text="⏭ Позже",
                               callback_data=f"rel:later:{military_id}")],
@@ -146,7 +146,7 @@ def confirm_relative_kb() -> InlineKeyboardMarkup:
 def add_more_relatives_kb(military_id: int) -> InlineKeyboardMarkup:
     """После сохранения родственника — спросить добавить ещё"""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Добавить ещё родственника",
+        [InlineKeyboardButton(text="➕ Добавить ещё",
                               callback_data=f"rel:more:{military_id}")],
         [InlineKeyboardButton(text="✅ Готово",
                               callback_data="rel:done")],

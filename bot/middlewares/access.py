@@ -45,8 +45,7 @@ class AccessMiddleware(BaseMiddleware):
         # Доступа нет — отказ
         if not is_admin and not manager:
             text = (
-                "🚫 У вас нет доступа к боту.\n"
-                "Обратитесь к администратору."
+                "У вас нет доступа к боту.\n"
             )
             if isinstance(event, Message):
                 await event.answer(text)
