@@ -7,7 +7,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
 
 from bot.db.connection import get_pool, close_pool
-from bot.handlers import commands, input as input_handler
+from bot.handlers import commands, admin, input as input_handler
+from bot.middlewares.access import AccessMiddleware
 
 load_dotenv()
 
@@ -22,11 +23,15 @@ async def main():
     bot = Bot(token=os.getenv("BOT_TOKEN"))
     dp = Dispatcher(storage=MemoryStorage())
 
-    # Регистрируем роутеры
+    # Middleware проверки доступа на всех апдейтах
+    dp.message.middleware(AccessMiddleware())
+    dp.callback_query.middleware(AccessMiddleware())
+
+    # Роутеры (порядок важен: admin → commands → input)
+    dp.include_router(admin.router)
     dp.include_router(commands.router)
     dp.include_router(input_handler.router)
 
-    # Инициализируем пул БД
     await get_pool()
     logger.info("Database pool initialized")
 
