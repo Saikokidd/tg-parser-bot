@@ -19,7 +19,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 API_BASE = "https://api.sauron.info/v1/query/get"
-TIMEOUT_SEC = 30
+TIMEOUT_SEC = 60
 
 
 class SauronError(Exception):
@@ -129,15 +129,46 @@ async def query_phone(phone: str, parser: bool = False) -> dict:
 
 # ──────────── Утилита: разбить ФИО ────────────
 
+# Тюркские/арабские постфиксы отчества — Sauron их не принимает
+# Убираем их перед отправкой запроса (Оглы/Кызы — "сын/дочь" по-тюркски)
+TURKIC_FILIAL_SUFFIXES = {
+    "оглы", "оглу", "огли",
+    "кызы", "кизи", "гызы",
+    "ызы",  # обрезанные
+}
+
+
+def _clean_name_part(part: str) -> str:
+    """Убрать неподдерживаемые Sauron символы из части имени"""
+    # Только буквы, тире и пробелы. Точки, скобки, цифры — выбрасываем
+    import re as _re
+    cleaned = _re.sub(r'[^а-яёА-ЯЁa-zA-Z\-\s]', '', part).strip()
+    return cleaned
+
+
 def split_full_name(full_name: str) -> tuple[str, str, Optional[str]]:
     """
     Из 'Иванов Иван Иванович' → ('Иванов', 'Иван', 'Иванович')
     Из 'Иванов Иван' → ('Иванов', 'Иван', None)
+
+    Дополнительно: убирает тюркские постфиксы 'Оглы/Кызы/Оглу' и
+    проблемные символы (скобки, цифры, точки) — иначе Sauron API возвращает 400.
     """
     parts = full_name.strip().split()
     if len(parts) < 2:
         raise ValueError(f"ФИО должно содержать минимум фамилию и имя: '{full_name}'")
-    lastname = parts[0]
-    firstname = parts[1]
-    middlename = parts[2] if len(parts) >= 3 else None
+
+    # Отфильтровываем тюркские постфиксы из любых позиций
+    filtered = [p for p in parts if p.lower() not in TURKIC_FILIAL_SUFFIXES]
+    if len(filtered) < 2:
+        # После очистки осталось меньше двух слов — берём что есть
+        filtered = parts
+
+    lastname = _clean_name_part(filtered[0])
+    firstname = _clean_name_part(filtered[1])
+    middlename = _clean_name_part(filtered[2]) if len(filtered) >= 3 else None
+
+    if not lastname or not firstname:
+        raise ValueError(f"После очистки не осталось валидных частей ФИО: '{full_name}'")
+
     return lastname, firstname, middlename

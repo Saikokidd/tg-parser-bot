@@ -11,6 +11,7 @@ from typing import Optional
 
 from bot.services import sauron_api
 from bot.parser import sauron_parser
+from bot.services import voxlink_service, email_validator_service
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,10 @@ async def _probit_sauron(full_name: str, birth_date) -> dict:
         lastname, firstname, middlename = sauron_api.split_full_name(full_name)
     except ValueError as e:
         raise ValueError(f"Не могу разобрать ФИО для пробива: {e}")
+
+    # Логируем намерение запроса — поможет понять "почему мало данных" в будущем
+    bd_str = birth_date.strftime("%d.%m.%Y") if birth_date else "БЕЗ ДР"
+    logger.info(f"_probit_sauron: {full_name} ({bd_str})")
 
     kwargs = {
         "lastname": lastname,
@@ -116,7 +121,44 @@ async def probit_person(full_name: str, birth_date=None) -> ProbivResult:
                 result.relative_template = template
                 break
 
+    # Обогащение шаблона через дополнительные API
+    if result.relative_template:
+        await _enrich_template(result.relative_template)
+
     return result
+
+
+async def _enrich_template(template: dict) -> None:
+    """
+    Обогащает шаблон родственника:
+    - Телефон → voxlink → operator + region
+    - emails_top → smtp.bz → только валидные
+    Изменяет template inplace.
+    """
+    # Запускаем параллельно: lookup_phone + validate_emails
+    phone = template.get("phone")
+    emails_top = template.get("emails_top") or []
+
+    tasks = []
+    tasks.append(voxlink_service.lookup_phone(phone) if phone else asyncio.sleep(0, result=None))
+    tasks.append(
+        email_validator_service.validate_emails_parallel(emails_top)
+        if emails_top else asyncio.sleep(0, result={})
+    )
+
+    phone_info, email_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Обработка исключений
+    if isinstance(phone_info, Exception):
+        logger.warning(f"voxlink failed: {phone_info}")
+        phone_info = None
+    if isinstance(email_results, Exception):
+        logger.warning(f"email validation failed: {email_results}")
+        email_results = {}
+
+    # Записываем в шаблон
+    template["phone_info"] = phone_info  # dict | None
+    template["valid_emails"] = [e for e, ok in (email_results or {}).items() if ok]
 
 
 # ──────────── Форматирование результата для бота ────────────
@@ -125,29 +167,21 @@ def format_probiv_result(result: ProbivResult, header: str = "") -> str:
     """
     Сформировать текстовый ответ менеджеру:
     - Заголовок (например "🔍 Пробив выполнен")
-    - Стоимость + статистика по провайдерам
     - Возможные связи по адресу
-    - (шаблон родственника показываем отдельным сообщением — он жирный)
+
+    Стоимость и количество провайдеров не показываем.
     """
     parts = []
     if header:
         parts.append(header)
 
-    # Статистика
     n_ok = len(result.raw_results)
-    n_fail = len(result.errors)
-    if n_ok > 0:
-        parts.append(
-            f"💰 Стоимость пробива: *{result.total_cost:.2f} ₽* "
-            f"({n_ok}/{n_ok + n_fail} провайдеров)"
-        )
-    else:
+    if n_ok == 0:
         parts.append("⚠️ Все провайдеры пробива вернули ошибку:")
         for err in result.errors:
             parts.append(f"  • {err}")
         return "\n".join(parts)
 
-    # Связи
     parts.append("")
     parts.append(sauron_parser.format_address_relations(result.address_relations))
 

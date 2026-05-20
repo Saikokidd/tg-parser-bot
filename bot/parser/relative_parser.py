@@ -135,6 +135,30 @@ def parse_relative(text: str) -> dict:
     return result
 
 
+def parse_relatives_batch(text: str) -> list[dict]:
+    """
+    Распарсить текст из нескольких блоков родственников.
+    Блоки разделяются одной или несколькими пустыми строками.
+
+    Возвращает список dict (даже если в тексте один блок).
+    Каждый блок проходит через parse_relative — невалидные тоже попадают
+    в результат, фильтрация в хендлере по validate_relative.
+    """
+    # Разбиваем по двойному (или более) переносу строки — это надёжнее одного.
+    # Но менеджер может разделять одной пустой строкой, поэтому делаем регулярку
+    # которая ловит "\n\n+" (одна и более пустых строк подряд)
+    import re as _re
+    blocks = _re.split(r"\n\s*\n+", text.strip())
+
+    results = []
+    for block in blocks:
+        block = block.strip()
+        if not block:
+            continue
+        results.append(parse_relative(block))
+    return results
+
+
 def validate_relative(data: dict) -> Optional[str]:
     """Возвращает строку с ошибкой или None если ok"""
     if not data.get('full_name'):
@@ -173,3 +197,22 @@ def format_relative_record(record: dict) -> str:
         f"{birth_str} | 📞 {record.get('phone', '—')}\n"
         f"{record.get('address', '—')}"
     )
+
+
+def parse_relatives_batch(text: str) -> list[dict]:
+    """
+    Распарсить текст из одного или нескольких блоков родственников.
+    Блоки разделяются одной или несколькими пустыми строками.
+    
+    Возвращает список dict — даже если в тексте один блок.
+    Каждый блок проходит через parse_relative; невалидные тоже попадают
+    в результат, фильтрация по validate_relative делается в хендлере.
+    """
+    blocks = re.split(r"\n\s*\n+", text.strip())
+    results = []
+    for block in blocks:
+        block = block.strip()
+        if not block:
+            continue
+        results.append(parse_relative(block))
+    return results

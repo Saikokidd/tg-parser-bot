@@ -8,16 +8,23 @@ from aiogram.types import (
 #                    ГЛАВНОЕ МЕНЮ
 # ════════════════════════════════════════════════════════════
 
-def main_menu(is_admin: bool = False) -> ReplyKeyboardMarkup:
+def main_menu(is_admin: bool = False, is_supervisor: bool = False) -> ReplyKeyboardMarkup:
     """Главное меню (reply-клавиатура)"""
-    rows = [
-        [KeyboardButton(text="🔍 Пробить")],
-        [KeyboardButton(text="✍️ Заполнить")],
-        [KeyboardButton(text="📋 Не заполнены")],
-        [KeyboardButton(text="📊 Моя база")],
-    ]
-    if is_admin:
-        rows.append([KeyboardButton(text="⚙️ Управление ботом")])
+    if is_supervisor:
+        rows = [
+            [KeyboardButton(text="📊 Статистика")],
+            [KeyboardButton(text="Список лидов")],
+        ]
+    else:
+        rows = [
+            [KeyboardButton(text="🔍 Пробить")],
+            [KeyboardButton(text="✍️ Заполнить")],
+            [KeyboardButton(text="Список лидов")],
+            [KeyboardButton(text="📊 Статистика")],
+            [KeyboardButton(text="📤 Выгрузить лидов")],
+        ]
+        if is_admin:
+            rows.append([KeyboardButton(text="⚙️ Управление ботом")])
 
     return ReplyKeyboardMarkup(
         keyboard=rows,
@@ -134,6 +141,26 @@ def military_list_kb(records: list, action: str = "rel:pick") -> InlineKeyboardM
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def fill_action_kb(military_id: int) -> InlineKeyboardMarkup:
+    """
+    После выбора лида в '✍️ Заполнить' — выбор действия:
+    🔍 Пробить через Sauron
+    ✍️ Заполнить вручную
+    ❌ Отмена
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🔍 Пробить через Sauron",
+            callback_data=f"rel:probiv:{military_id}"
+        )],
+        [InlineKeyboardButton(
+            text="✍️ Заполнить вручную",
+            callback_data=f"rel:manual:{military_id}"
+        )],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")],
+    ])
+
+
 def confirm_relative_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -156,30 +183,34 @@ def add_more_relatives_kb(military_id: int) -> InlineKeyboardMarkup:
 # ════════════════════════════════════════════════════════════
 #                       ПРОБИВ
 # ════════════════════════════════════════════════════════════
+# Максимум кнопок в одном сообщении — Telegram лимит на reply_markup ~10KB.
+# С учётом длинных ФИО + emoji + callback_data — безопасно держим до 15.
+PROBIV_BUTTONS_MAX = 15
+
 
 def probiv_persons_kb(blocks: list[dict]) -> InlineKeyboardMarkup:
     """
     Список людей из 'возможных связей' кнопками.
     Каждая кнопка → пробить этого человека дальше.
     Дедуплицируем по (ФИО + ДР) чтобы один человек не дублировался между годами.
+    Ограничиваем количеством PROBIV_BUTTONS_MAX, иначе Telegram отдаст 400 на reply_markup.
     """
     seen = set()
     rows = []
     idx = 0  # короткий ID для callback_data (Telegram лимит 64 байта)
-
     for block in blocks:
         for p in block["persons"]:
+            if len(rows) >= PROBIV_BUTTONS_MAX:
+                break
             key = f"{p['full_name']}|{p['birth_date_str']}"
             if key in seen:
                 continue
             seen.add(key)
-
             label = p["full_name"]
             if p["birth_date_str"]:
                 label += f" • {p['birth_date_str']}"
             if len(label) > 60:
                 label = label[:57] + "..."
-
             rows.append([
                 InlineKeyboardButton(
                     text=f"🔍 {label}",
@@ -187,8 +218,248 @@ def probiv_persons_kb(blocks: list[dict]) -> InlineKeyboardMarkup:
                 )
             ])
             idx += 1
+        if len(rows) >= PROBIV_BUTTONS_MAX:
+            break
 
     rows.append([
         InlineKeyboardButton(text="✅ Готово", callback_data="probiv:done")
     ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def attach_relative_kb(person_idx: int, military_label: str) -> InlineKeyboardMarkup:
+    """
+    Кнопки после показа шаблона родственника:
+    📌 Закрепить за {ФИО военного}
+    📂 Закрепить позже (просто убирает кнопки)
+    """
+    # Обрезаем подпись если ФИО длинное
+    if len(military_label) > 35:
+        military_label = military_label[:32] + "..."
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"📌 Закрепить за {military_label}",
+            callback_data=f"attach:do:{person_idx}"
+        )],
+        [InlineKeyboardButton(
+            text="📂 Закрепить позже",
+            callback_data=f"attach:later:{person_idx}"
+        )],
+    ])
+
+
+def attach_duplicate_kb(person_idx: int) -> InlineKeyboardMarkup:
+    """
+    При обнаружении дубля родственника — два пути:
+    - Закрепить как нового (новая запись + связка)
+    - Использовать существующего (только новая связка)
+    - Отмена
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="➕ Закрепить как нового",
+            callback_data=f"attach:dup:new:{person_idx}"
+        )],
+        [InlineKeyboardButton(
+            text="♻ Использовать существующего",
+            callback_data=f"attach:dup:reuse:{person_idx}"
+        )],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="attach:dup:cancel")],
+    ])
+
+
+# ════════════════════════════════════════════════════════════
+#                       СТАТИСТИКА
+# ════════════════════════════════════════════════════════════
+
+def stats_period_kb(period: str = None, page: int = 0, total_pages: int = 1) -> InlineKeyboardMarkup:
+    """
+    Клавиатура статистики.
+    Сверху — кнопки переключения страниц (только если total_pages > 1).
+    Внизу — кнопки переключения периода (с маркером текущего).
+    """
+    rows = []
+
+    # Пагинация (только когда страниц больше одной)
+    if total_pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(
+                text="◀", callback_data=f"stats:page:{period}:{page - 1}"
+            ))
+        nav.append(InlineKeyboardButton(
+            text=f"{page + 1}/{total_pages}", callback_data="stats:noop"
+        ))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton(
+                text="▶", callback_data=f"stats:page:{period}:{page + 1}"
+            ))
+        rows.append(nav)
+
+    # Кнопки периодов с маркером
+    def label(text, p):
+        return f"• {text} •" if p == period else text
+
+    rows.append([
+        InlineKeyboardButton(
+            text=label("За сегодня", "today"),
+            callback_data="stats:today"
+        ),
+        InlineKeyboardButton(
+            text=label("За неделю", "week"),
+            callback_data="stats:week"
+        ),
+    ])
+    rows.append([
+        InlineKeyboardButton(
+            text=label("За всё время", "all"),
+            callback_data="stats:all"
+        ),
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+    
+    
+# ════════════════════════════════════════════════════════════
+#                       СПИСОК ЛИДОВ
+# ════════════════════════════════════════════════════════════
+
+def leads_list_kb(records: list, page: int, total_pages: int) -> InlineKeyboardMarkup:
+    """
+    Список военных кнопками с пагинацией.
+    Каждая кнопка — карточка лида.
+    """
+    rows = []
+    for r in records:
+        birth = r.get('birth_date')
+        birth_str = birth.strftime('%d.%m.%Y') if birth else '—'
+        rel_count = r.get('relatives_count', 0)
+        marker = '✓' if rel_count > 0 else '○'
+        label = f"{marker} {r['full_name']} • {birth_str} ({rel_count})"
+        if len(label) > 60:
+            label = label[:57] + "..."
+        rows.append([
+            InlineKeyboardButton(text=label, callback_data=f"lead:show:{r['id']}")
+        ])
+
+    # Пагинация
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton(text="« Назад", callback_data=f"lead:page:{page - 1}"))
+    if total_pages > 1:
+        nav.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data="lead:noop"))
+    if page < total_pages:
+        nav.append(InlineKeyboardButton(text="Далее »", callback_data=f"lead:page:{page + 1}"))
+    if nav:
+        rows.append(nav)
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def lead_card_kb(military_id: int, relatives: list) -> InlineKeyboardMarkup:
+    """
+    Кнопки в карточке лида:
+    - на каждого родственника: ✏️ редактировать / 🗑 удалить
+    - ➕ Дополнить (добавить ещё родственника)
+    - 🗑 Удалить лида
+    - « Назад к списку
+    """
+    rows = []
+    for r in relatives:
+        name = r.get('full_name', '—')
+        if len(name) > 35:
+            name = name[:32] + "..."
+        rows.append([
+            InlineKeyboardButton(text=f"✏️ {name}", callback_data=f"rel:edit:{r['id']}:{military_id}"),
+            InlineKeyboardButton(text="🗑", callback_data=f"rel:del:{r['id']}:{military_id}"),
+        ])
+    rows.append([
+        InlineKeyboardButton(text="➕ Дополнить", callback_data=f"lead:addrel:{military_id}")
+    ])
+    rows.append([
+        InlineKeyboardButton(text="🗑 Удалить лида", callback_data=f"lead:del:{military_id}")
+    ])
+    rows.append([
+        InlineKeyboardButton(text="« К списку", callback_data="lead:back")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def confirm_delete_lead_kb(military_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"lead:del_yes:{military_id}"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data=f"lead:show:{military_id}"),
+        ]
+    ])
+
+
+def confirm_delete_relative_kb(relative_id: int, military_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"rel:del_yes:{relative_id}:{military_id}"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data=f"lead:show:{military_id}"),
+        ]
+    ])
+
+
+# ════════════════════════════════════════════════════════════
+#                  РЕДАКТИРОВАНИЕ РОДСТВЕННИКА
+# ════════════════════════════════════════════════════════════
+
+# Поля редактирования: (callback_id, лейбл, тип)
+EDIT_FIELDS = [
+    ("full_name", "ФИО", "structural"),
+    ("birth_date", "ДР", "structural"),
+    ("phone", "Телефон", "structural"),
+    ("address", "Адрес", "structural"),
+    ("snils", "СНИЛС", "extra"),
+    ("inn", "ИНН", "extra"),
+    ("passport", "Паспорт", "extra"),
+    ("email", "Почта", "extra"),
+]
+
+
+def edit_relative_fields_kb(relative_id: int, military_id: int) -> InlineKeyboardMarkup:
+    """Меню выбора поля для редактирования"""
+    rows = []
+    # По 2 кнопки в ряд
+    for i in range(0, len(EDIT_FIELDS), 2):
+        row = []
+        for field_id, label, _ in EDIT_FIELDS[i:i+2]:
+            row.append(InlineKeyboardButton(
+                text=label,
+                callback_data=f"rel:editfield:{relative_id}:{military_id}:{field_id}"
+            ))
+        rows.append(row)
+    rows.append([
+        InlineKeyboardButton(
+            text="➕ Своё поле",
+            callback_data=f"rel:editfield:{relative_id}:{military_id}:_custom"
+        )
+    ])
+    rows.append([
+        InlineKeyboardButton(text="« Назад", callback_data=f"lead:show:{military_id}")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# ════════════════════════════════════════════════════════════
+#                       ВЫГРУЗКА ЛИДОВ
+# ════════════════════════════════════════════════════════════
+
+def export_count_kb(available: int) -> InlineKeyboardMarkup:
+    """Клавиатура выбора количества для выгрузки"""
+    rows = [
+        [InlineKeyboardButton(
+            text=f"📤 Выгрузить всё ({available})",
+            callback_data="export:all"
+        )],
+        [InlineKeyboardButton(
+            text="🔢 Указать количество",
+            callback_data="export:custom"
+        )],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="export:cancel")],
+    ]
     return InlineKeyboardMarkup(inline_keyboard=rows)

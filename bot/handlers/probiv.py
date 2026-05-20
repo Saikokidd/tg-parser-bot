@@ -7,7 +7,7 @@
 
 2. Менеджер жмёт "🔍 [имя]" → новый запрос к API по этому человеку →
    возвращаем заполненный шаблон родственника (с самыми частыми значениями).
-   Менеджер копирует шаблон и через "✍️ Заполнить родственников" вносит в БД.
+   Менеджер копирует шаблон и через "✍️ Заполнить" вносит в БД.
 """
 import logging
 from datetime import date
@@ -19,7 +19,18 @@ from bot.services.probiv_service import (
     probit_person, format_probiv_result, ProbivResult
 )
 from bot.parser.sauron_parser import format_relative_template
-from bot.keyboards.menus import probiv_persons_kb
+from bot.keyboards.menus import (
+    probiv_persons_kb,
+    attach_relative_kb,
+    attach_duplicate_kb,
+)
+from bot.utils.long_message import safe_edit_or_send
+from bot.db.queries import (
+    find_relative_duplicates,
+    insert_relative,
+    link_military_relative,
+    get_military_by_id,
+)
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -30,23 +41,18 @@ router = Router()
 # ════════════════════════════════════════════════════════════
 
 async def run_probiv_after_save(
-    message_or_callback,
+    target: Message,
     state: FSMContext,
     full_name: str,
-    birth_date: date | None
+    birth_date: date | None,
+    military_id: int | None = None,
 ):
     """
     Вызывается из military.py после успешного сохранения военного.
     Делает пробив и кладёт результат в FSM (для последующих "Пробить далее").
+    target — сообщение в чат которого пишем ответы.
     """
-    target = (
-        message_or_callback.message
-        if isinstance(message_or_callback, CallbackQuery)
-        else message_or_callback
-    )
-
-    # Сообщаем что начали пробив
-    status_msg = await target.answer("⏳ Делаю пробив через внешние API...")
+    status_msg = await target.answer("🔍 Пробиваю через Sauron на наличие возможных связей...")
 
     try:
         result: ProbivResult = await probit_person(full_name, birth_date)
@@ -58,7 +64,7 @@ async def run_probiv_after_save(
         await status_msg.edit_text(f"❌ Ошибка пробива: {e}")
         return
 
-    # Если все провайдеры упали — показываем ошибки и выходим
+    # Если все провайдеры упали
     if not result.raw_results:
         await status_msg.edit_text(format_probiv_result(result, header="🔍 *Пробив*"))
         return
@@ -74,22 +80,24 @@ async def run_probiv_after_save(
             seen.add(key)
             persons_index.append(p)
 
-    await state.update_data(probiv_persons=persons_index)
-
-    # Показываем результат
+    # Запоминаем контекст для будущих "Закрепить":
+    # - какой именно военный пробивался
+    # - его ФИО для подписи кнопки
+    # - индекс шаблонов родственников (заполняется по мере кликов "Пробить далее")
+    await state.update_data(
+        probiv_persons=persons_index,
+        probiv_origin_military_name=full_name,
+        probiv_origin_military_id=military_id,
+        probiv_templates={},  # idx → распарсенный шаблон
+    )
+    # Показываем результат (с авто-разбиением длинных сообщений)
     text = format_probiv_result(result, header="🔍 *Пробив выполнен*")
-    if result.address_relations:
-        await status_msg.edit_text(
-            text,
-            parse_mode="Markdown",
-            reply_markup=probiv_persons_kb(result.address_relations)
-        )
-        await target.answer(
-            "ℹ️ Нажмите на любого найденного человека чтобы пробить его и "
-            "получить шаблон родственника."
-        )
-    else:
-        await status_msg.edit_text(text, parse_mode="Markdown")
+    keyboard = probiv_persons_kb(result.address_relations) if result.address_relations else None
+    await safe_edit_or_send(
+        status_msg, text,
+        parse_mode="Markdown",
+        reply_markup=keyboard,
+    )
 
 
 # ════════════════════════════════════════════════════════════
@@ -98,17 +106,19 @@ async def run_probiv_after_save(
 
 @router.callback_query(F.data.startswith("probiv:next:"))
 async def probiv_next(callback: CallbackQuery, state: FSMContext):
+    # Сразу подтверждаем нажатие — защита от тройного срабатывания при двойном клике
+    await callback.answer()
+
     idx = int(callback.data.split(":")[2])
     data = await state.get_data()
     persons = data.get("probiv_persons", [])
-
     if idx >= len(persons):
-        await callback.answer("⚠️ Запись не найдена.", show_alert=True)
+        await callback.message.answer("⚠️ Запись не найдена.")
         return
-
     person = persons[idx]
     full_name = person["full_name"]
-    birth_str = person["birth_date_str"]  # 'ДД.ММ.ГГГГ' или ''
+    birth_str = person["birth_date_str"]
+
 
     # Парсим дату обратно в date
     birth_date = None
@@ -119,17 +129,44 @@ async def probiv_next(callback: CallbackQuery, state: FSMContext):
         except Exception:
             birth_date = None
 
-    await callback.answer()
+    # Если в найденной связи нет ДР — пробуем найти такое же ФИО в нашей БД
+    # (часто этот человек уже есть как родственник у другого лида с заполненной ДР).
+    # Без ДР Sauron возвращает гораздо меньше данных.
+    if birth_date is None:
+        from bot.db.queries import find_birth_date_by_name
+        birth_date = await find_birth_date_by_name(full_name)
+        if birth_date:
+            logger.info(f"probiv_next: ДР для {full_name} взята из БД ({birth_date})")
+
     status_msg = await callback.message.answer(
-        f"⏳ Пробиваю *{full_name}*...",
+        f"🔍 Пробиваю *{full_name}*...",
         parse_mode="Markdown"
     )
 
     try:
         result: ProbivResult = await probit_person(full_name, birth_date)
+    except ValueError as e:
+        # ФИО не прошло валидацию (например, после очистки от "Оглы" не хватает слов)
+        await status_msg.edit_text(
+            f"⚠️ Не удалось обработать имя «{full_name}»:\n"
+            f"`{e}`\n\n"
+            "_Внесите данные родственника вручную через «✍️ Заполнить»._",
+            parse_mode="Markdown"
+        )
+        return
     except Exception as e:
         logger.exception("Ошибка пробива (next)")
-        await status_msg.edit_text(f"❌ Ошибка пробива: {e}")
+        err_text = str(e)
+        # Sauron не принял имя (нестандартные символы)
+        if "Invalid characters" in err_text:
+            await status_msg.edit_text(
+                f"⚠️ Sauron не смог обработать имя «{full_name}»\n"
+                "(нестандартные символы или приставка типа Оглы/Кызы).\n\n"
+                "_Внесите данные родственника вручную через «✍️ Заполнить»._",
+                parse_mode="Markdown"
+            )
+            return
+        await status_msg.edit_text(f"❌ Ошибка пробива: {err_text[:200]}")
         return
 
     if not result.raw_results:
@@ -138,19 +175,287 @@ async def probiv_next(callback: CallbackQuery, state: FSMContext):
 
     # Шаблон родственника
     if result.relative_template:
-        cost_line = f"💰 Стоимость: *{result.total_cost:.2f} ₽*\n\n"
+        template = result.relative_template
+
+        # Проверяем — есть ли минимально необходимые поля для кнопки "Закрепить"?
+        # ФИО + ДР обязательны, телефон опционален (можно добавить позже).
+        has_key_fields = bool(
+            template.get("full_name")
+            and template.get("birth_date_str")
+        )
+
+        # Сохраняем результат пробива через обогащение (operator, region, valid_emails)
+        # Эти поля уже добавлены в template внутри probit_person
+        kb = None
+        if has_key_fields:
+            # Сохраняем шаблон в FSM для последующего "Закрепить"
+            templates = data.get("probiv_templates", {})
+            templates[str(idx)] = template  # ключи в JSON всегда строки
+            await state.update_data(probiv_templates=templates)
+
+            # Берём ФИО исходного военного для подписи кнопки
+            origin_name = data.get("probiv_origin_military_name", "лидом")
+            # Только фамилия + первая буква имени для краткости
+            label_parts = origin_name.split()
+            short_label = label_parts[0] if label_parts else origin_name
+            if len(label_parts) >= 2:
+                short_label = f"{label_parts[0]} {label_parts[1][:1]}."
+
+            kb = attach_relative_kb(idx, short_label)
+
+        text = format_relative_template(template)
+        if not has_key_fields:
+            text += "\n\n⚠️ _Для автоматического закрепления нужны минимум ФИО и ДР._\n_Внесите данные вручную через «✍️ Заполнить»._"
+
         await status_msg.edit_text(
-            cost_line + format_relative_template(result.relative_template),
-            parse_mode="Markdown"
+            text,
+            parse_mode="Markdown",
+            reply_markup=kb,
         )
     else:
         await status_msg.edit_text(
-            f"💰 Стоимость: {result.total_cost:.2f} ₽\n\n"
-            f"❌ Не удалось собрать шаблон родственника из ответа API."
+            f"⚠️ Данные по «{full_name}» найдены, но шаблон собрать не удалось.\n"
+            "Возможно, в результатах пробива нет ключевых полей.\n\n"
+            "_Внесите данные родственника вручную через «✍️ Заполнить»._",
+            parse_mode="Markdown"
         )
 
 
 @router.callback_query(F.data == "probiv:done")
-async def probiv_done(callback: CallbackQuery):
+async def probiv_done(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_reply_markup(reply_markup=None)
+    await state.clear()
     await callback.answer("Готово")
+    
+    
+# ════════════════════════════════════════════════════════════
+#  Шаг 3: закрепление родственника за военным
+# ════════════════════════════════════════════════════════════
+
+def _build_relative_data_from_template(template: dict) -> dict:
+    """
+    Преобразовать шаблон из Sauron в формат данных для insert_relative.
+    Извлекает все доступные поля + кладёт обогащение (operator, region) в extra.
+    """
+    # birth_date_str → date
+    from datetime import date as _date
+    birth_date = None
+    birth_str = template.get("birth_date_str")
+    if birth_str:
+        try:
+            d, m, y = birth_str.split(".")
+            birth_date = _date(int(y), int(m), int(d))
+        except Exception:
+            pass
+
+    extra = {}
+    for key in ("snils", "inn", "passport", "operator", "region"):
+        val = template.get(key)
+        if val:
+            extra[key] = val
+
+    # email — берём первый из valid_emails если он есть, иначе из обычного email
+    valid_emails = template.get("valid_emails") or []
+    if valid_emails:
+        extra["email"] = valid_emails[0]
+    elif template.get("email"):
+        extra["email"] = template["email"]
+
+    return {
+        "full_name": template.get("full_name"),
+        "birth_date": birth_date,
+        "phone": template.get("phone"),
+        "address": template.get("address"),
+        "extra": extra,
+    }
+
+
+async def _get_attach_context(callback: CallbackQuery, state: FSMContext, idx_str: str, manager: dict):
+    """
+    Извлечь из FSM весь нужный контекст для закрепления.
+    manager — приходит из middleware (как в других хендлерах).
+    Возвращает (manager_id, military_id, template) или None при ошибке.
+    """
+    data = await state.get_data()
+
+    logger.info(
+        f"_get_attach_context: idx={idx_str}, keys={list(data.keys())}, "
+        f"manager={'yes' if manager else 'no'}, "
+        f"military_id={data.get('probiv_origin_military_id')}, "
+        f"templates_keys={list((data.get('probiv_templates') or {}).keys())}"
+    )
+
+    templates = data.get("probiv_templates", {})
+    template = templates.get(idx_str)
+
+    if not template:
+        await callback.message.answer("⚠️ Данные родственника не найдены. Попробуйте пробить заново.")
+        return None
+
+    manager_id = manager.get("id") if manager else None
+    military_id = data.get("probiv_origin_military_id")
+
+    if not manager_id or not military_id:
+        await callback.message.answer(
+            "⚠️ Контекст лида утерян (возможно прошло слишком много времени).\n"
+            "Внесите данные вручную через «✍️ Заполнить»."
+        )
+        return None
+
+    return manager_id, military_id, template
+
+
+@router.callback_query(F.data.startswith("attach:later:"))
+async def attach_later(callback: CallbackQuery, state: FSMContext, manager: dict):
+    """📂 Закрепить позже — просто убираем кнопки, шаблон остаётся для копирования"""
+    await callback.answer("Шаблон остался для копирования")
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("attach:do:"))
+async def attach_do(callback: CallbackQuery, state: FSMContext, manager: dict):
+    """📌 Закрепить за военным — дубль-чек и сохранение"""
+    await callback.answer()
+    idx_str = callback.data.split(":")[2]
+
+    ctx = await _get_attach_context(callback, state, idx_str, manager)
+    if not ctx:
+        return
+    manager_id, military_id, template = ctx
+
+    relative_data = _build_relative_data_from_template(template)
+
+    # Проверяем дубли (2 из 4 полей)
+    duplicates = await find_relative_duplicates(
+        full_name=relative_data["full_name"],
+        birth_date=relative_data["birth_date"],
+        phone=relative_data["phone"],
+        address=relative_data["address"],
+    )
+
+    if duplicates:
+        # Запомним что хотим закрепить — для последующих коллбэков "Закрепить как нового / Использовать"
+        data = await state.get_data()
+        pending = data.get("attach_pending", {})
+        pending[idx_str] = {
+            "duplicate_id": duplicates[0]["id"],
+        }
+        await state.update_data(attach_pending=pending)
+
+        dup = duplicates[0]
+        dup_birth = dup.get("birth_date")
+        dup_birth_str = dup_birth.strftime("%d.%m.%Y") if dup_birth else "—"
+
+        lines = [
+            "⚠️ *В базе уже есть похожий родственник:*",
+            "",
+            f"• *{dup.get('full_name', '—')}* ({dup_birth_str})",
+        ]
+        if dup.get("phone"):
+            lines.append(f"  📞 {dup['phone']}")
+        if dup.get("address"):
+            addr = dup["address"]
+            if len(addr) > 70:
+                addr = addr[:67] + "..."
+            lines.append(f"  🏠 {addr}")
+        lines.append("")
+        lines.append("Что делаем?")
+
+        await callback.message.answer(
+            "\n".join(lines),
+            parse_mode="Markdown",
+            reply_markup=attach_duplicate_kb(int(idx_str)),
+        )
+        return
+
+    # Дубля нет — сразу сохраняем + создаём связку
+    rel = await insert_relative(relative_data, manager_id)
+    await link_military_relative(military_id, rel["id"], manager_id)
+
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await _finalize_attach(callback, state, relative_data["full_name"], reused=False)
+
+
+@router.callback_query(F.data.startswith("attach:dup:new:"))
+async def attach_dup_new(callback: CallbackQuery, state: FSMContext, manager: dict):
+    """➕ Закрепить как нового (несмотря на найденный дубль)"""
+    await callback.answer()
+    idx_str = callback.data.split(":")[3]
+
+    ctx = await _get_attach_context(callback, state, idx_str, manager)
+    if not ctx:
+        return
+    manager_id, military_id, template = ctx
+
+    relative_data = _build_relative_data_from_template(template)
+    rel = await insert_relative(relative_data, manager_id)
+    await link_military_relative(military_id, rel["id"], manager_id)
+
+    await callback.message.edit_text(
+        f"➕ Создан новый родственник: *{relative_data['full_name']}*",
+        parse_mode="Markdown",
+    )
+    await _finalize_attach(callback, state, relative_data["full_name"], reused=False)
+
+
+@router.callback_query(F.data.startswith("attach:dup:reuse:"))
+async def attach_dup_reuse(callback: CallbackQuery, state: FSMContext, manager: dict):
+    """♻ Использовать существующего (только создаём связку)"""
+    await callback.answer()
+    idx_str = callback.data.split(":")[3]
+
+    data = await state.get_data()
+    pending = data.get("attach_pending", {}).get(idx_str) or {}
+    dup_id = pending.get("duplicate_id")
+
+    ctx = await _get_attach_context(callback, state, idx_str, manager)
+    if not ctx or not dup_id:
+        await callback.message.edit_text("⚠️ Не найден существующий родственник для использования.")
+        return
+    manager_id, military_id, template = ctx
+
+    created = await link_military_relative(military_id, dup_id, manager_id)
+    if created:
+        await callback.message.edit_text(
+            f"♻ Существующий родственник привязан к лиду.",
+        )
+    else:
+        await callback.message.edit_text(
+            f"ℹ️ Этот родственник уже был привязан к лиду ранее.",
+        )
+
+    await _finalize_attach(callback, state, template.get("full_name") or "родственник", reused=True)
+
+
+@router.callback_query(F.data == "attach:dup:cancel")
+async def attach_dup_cancel(callback: CallbackQuery, state: FSMContext):
+    """❌ Отмена закрепления при дубле"""
+    await callback.answer("Отменено")
+    await callback.message.edit_text("❌ Закрепление отменено.")
+
+
+async def _finalize_attach(callback: CallbackQuery, state: FSMContext,
+                            relative_name: str, reused: bool):
+    """
+    После успешного закрепления — сообщаем и предлагаем продолжить
+    с остальными кандидатами из списка.
+    """
+    data = await state.get_data()
+    persons = data.get("probiv_persons") or []
+    templates = data.get("probiv_templates") or {}
+
+    # Сколько ещё не обработано (не было кликов "Пробить далее")
+    not_yet_clicked = sum(1 for i, _ in enumerate(persons) if str(i) not in templates)
+
+    if reused:
+        msg = f"♻ *{relative_name}* привязан к лиду."
+    else:
+        msg = f"✅ *{relative_name}* закреплён за лидом."
+
+    if not_yet_clicked > 0:
+        msg += f"\n\n_Остальных кандидатов из списка можно пробить кнопками выше ({not_yet_clicked} осталось)._"
+
+    await callback.message.answer(msg, parse_mode="Markdown")

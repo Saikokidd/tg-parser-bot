@@ -2,6 +2,7 @@ from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from bot.utils.menu_guard import is_menu_button_pressed
 
 from bot.db.queries import (
     list_managers, create_manager, get_manager_by_id,
@@ -110,6 +111,8 @@ async def add_manager_start(callback: CallbackQuery, state: FSMContext, is_admin
 
 @router.message(AddManagerStates.waiting_name)
 async def add_manager_name(message: Message, state: FSMContext):
+    if await is_menu_button_pressed(message, state):
+        return
     name = message.text.strip()
     if len(name) < 2:
         await message.answer("⚠️ Имя слишком короткое. Попробуйте ещё раз:")
@@ -126,6 +129,8 @@ async def add_manager_name(message: Message, state: FSMContext):
 
 @router.message(AddManagerStates.waiting_telegram_id)
 async def add_manager_telegram_id(message: Message, state: FSMContext):
+    if await is_menu_button_pressed(message, state):
+        return
     tid_text = message.text.strip()
     if not tid_text.isdigit():
         await message.answer("⚠️ Telegram ID должен быть числом. Попробуйте ещё раз:")
@@ -206,6 +211,8 @@ async def edit_id_select(callback: CallbackQuery, state: FSMContext, is_admin: b
 
 @router.message(EditManagerIdStates.waiting_telegram_id)
 async def edit_id_save(message: Message, state: FSMContext):
+    if await is_menu_button_pressed(message, state):
+        return
     tid_text = message.text.strip()
     if not tid_text.isdigit():
         await message.answer("⚠️ Telegram ID должен быть числом. Попробуйте ещё раз:")

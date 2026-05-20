@@ -107,21 +107,51 @@ async def deactivate_manager(manager_id: int) -> None:
 # ════════════════════════════════════════════════════════════
 
 async def find_military_duplicates(full_name: str = None, birth_date=None) -> list:
-    """Поиск дублей военного по ФИО + ДР (нужно совпадение обоих)"""
-    if not full_name and not birth_date:
+    """
+    Поиск дублей военного.
+
+    Стратегия:
+    1. Если есть и ФИО и ДР — ищем точные совпадения ФИО+ДР,
+       а также записи с тем же ФИО но БЕЗ ДР (это потенциальный дубль).
+    2. Если есть только ФИО (ДР=None) — ищем по ФИО любые записи:
+       и без ДР, и с ДР (любой может оказаться этим же человеком).
+
+    Записи с точным совпадением ФИО+ДР идут первыми.
+    """
+    if not full_name:
         return []
+
     pool = await get_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT pm.*, m.name as manager_name
-            FROM persons_military pm
-            LEFT JOIN managers m ON pm.added_by = m.id
-            WHERE LOWER(pm.full_name) = LOWER($1) AND pm.birth_date = $2
-            ORDER BY pm.created_at DESC
-            """,
-            full_name, birth_date
-        )
+        if birth_date is not None:
+            # Есть ДР — ищем строгие дубли + дубли без ДР
+            rows = await conn.fetch(
+                """
+                SELECT pm.*, m.name as manager_name
+                FROM persons_military pm
+                LEFT JOIN managers m ON pm.added_by = m.id
+                WHERE LOWER(pm.full_name) = LOWER($1)
+                  AND (pm.birth_date = $2 OR pm.birth_date IS NULL)
+                ORDER BY 
+                    CASE WHEN pm.birth_date = $2 THEN 0 ELSE 1 END,
+                    pm.created_at DESC
+                """,
+                full_name, birth_date
+            )
+        else:
+            # ДР нет — ищем по ФИО любые записи
+            rows = await conn.fetch(
+                """
+                SELECT pm.*, m.name as manager_name
+                FROM persons_military pm
+                LEFT JOIN managers m ON pm.added_by = m.id
+                WHERE LOWER(pm.full_name) = LOWER($1)
+                ORDER BY 
+                    CASE WHEN pm.birth_date IS NULL THEN 0 ELSE 1 END,
+                    pm.created_at DESC
+                """,
+                full_name
+            )
         return [dict(r) for r in rows]
 
 
@@ -133,7 +163,7 @@ async def insert_military(data: dict, manager_id: int) -> dict:
             """
             INSERT INTO persons_military
                 (full_name, birth_date, status, extra, added_by)
-            VALUES ($1, $2, $3::military_status, $4, $5)
+            VALUES ($1, $2, $3, $4, $5)
             RETURNING *
             """,
             data.get("full_name"),
@@ -171,37 +201,33 @@ async def list_military_by_manager(manager_id: int) -> list:
 
 
 async def list_military_without_relatives(manager_id: int = None) -> list:
-    """Военные по которым ещё не собраны родственники (relatives_collected = FALSE).
-    Если manager_id указан — только его записи."""
+    """
+    Военные у которых нет НИ ОДНОЙ привязки в military_relatives.
+    Если manager_id указан — только записи этого менеджера.
+    """
     pool = await get_pool()
     async with pool.acquire() as conn:
         if manager_id:
             rows = await conn.fetch(
                 """
-                SELECT * FROM persons_military
-                WHERE relatives_collected = FALSE AND added_by = $1
-                ORDER BY created_at DESC
+                SELECT pm.* FROM persons_military pm
+                LEFT JOIN military_relatives mr ON mr.military_id = pm.id
+                WHERE mr.id IS NULL AND pm.added_by = $1
+                ORDER BY pm.created_at DESC
                 """,
                 manager_id
             )
         else:
             rows = await conn.fetch(
                 """
-                SELECT * FROM persons_military
-                WHERE relatives_collected = FALSE
-                ORDER BY created_at DESC
+                SELECT pm.* FROM persons_military pm
+                LEFT JOIN military_relatives mr ON mr.military_id = pm.id
+                WHERE mr.id IS NULL
+                ORDER BY pm.created_at DESC
                 """
             )
         return [dict(r) for r in rows]
 
-
-async def mark_relatives_collected(military_id: int, value: bool = True) -> None:
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE persons_military SET relatives_collected = $1, updated_at = NOW() WHERE id = $2",
-            value, military_id
-        )
 
 
 # ════════════════════════════════════════════════════════════
@@ -293,3 +319,523 @@ async def get_relatives_of_military(military_id: int) -> list:
             military_id
         )
         return [dict(r) for r in rows]
+
+
+# ════════════════════════════════════════════════════════════
+#                       СТАТИСТИКА
+# ════════════════════════════════════════════════════════════
+
+async def stats_for_manager(manager_id: int, since=None) -> dict:
+    """
+    Статистика по одному менеджеру:
+      loaded — кол-во военных созданных менеджером (опц. с since)
+      filled — кол-во военных с хотя бы одним привязанным родственником
+    
+    since — datetime начала периода, или None для всего времени.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if since:
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    COUNT(*) AS loaded,
+                    COUNT(*) FILTER (
+                        WHERE EXISTS (
+                            SELECT 1 FROM military_relatives mr
+                            WHERE mr.military_id = pm.id
+                        )
+                    ) AS filled
+                FROM persons_military pm
+                WHERE pm.added_by = $1 AND pm.created_at >= $2
+                """,
+                manager_id, since
+            )
+        else:
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    COUNT(*) AS loaded,
+                    COUNT(*) FILTER (
+                        WHERE EXISTS (
+                            SELECT 1 FROM military_relatives mr
+                            WHERE mr.military_id = pm.id
+                        )
+                    ) AS filled
+                FROM persons_military pm
+                WHERE pm.added_by = $1
+                """,
+                manager_id
+            )
+        return {
+            "loaded": row["loaded"] or 0,
+            "filled": row["filled"] or 0,
+        }
+
+
+async def stats_for_all_managers(since=None) -> list:
+    """
+    Статистика по всем активным менеджерам.
+    Возвращает список: [{manager_id, name, loaded, filled}, ...]
+    Сортировка: по убыванию loaded.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if since:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    m.id AS manager_id,
+                    m.name,
+                    COUNT(pm.id) AS loaded,
+                    COUNT(pm.id) FILTER (
+                        WHERE EXISTS (
+                            SELECT 1 FROM military_relatives mr
+                            WHERE mr.military_id = pm.id
+                        )
+                    ) AS filled
+                FROM managers m
+                LEFT JOIN persons_military pm
+                    ON pm.added_by = m.id AND pm.created_at >= $1
+                WHERE m.is_active = TRUE
+                GROUP BY m.id, m.name
+                ORDER BY loaded DESC, m.name
+                """,
+                since
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    m.id AS manager_id,
+                    m.name,
+                    COUNT(pm.id) AS loaded,
+                    COUNT(pm.id) FILTER (
+                        WHERE EXISTS (
+                            SELECT 1 FROM military_relatives mr
+                            WHERE mr.military_id = pm.id
+                        )
+                    ) AS filled
+                FROM managers m
+                LEFT JOIN persons_military pm ON pm.added_by = m.id
+                WHERE m.is_active = TRUE
+                GROUP BY m.id, m.name
+                ORDER BY loaded DESC, m.name
+                """
+            )
+        return [dict(r) for r in rows]
+    
+    
+# ════════════════════════════════════════════════════════════
+#                       СПИСОК ЛИДОВ (с пагинацией)
+# ════════════════════════════════════════════════════════════
+
+async def list_military_paginated(
+    manager_id: int = None,
+    page: int = 1,
+    page_size: int = 20
+) -> tuple[list, int]:
+    """
+    Список ВСЕХ военных с пагинацией.
+    Если manager_id указан — только записи этого менеджера, иначе все.
+    
+    Возвращает кортеж (records, total_count).
+    """
+    pool = await get_pool()
+    offset = (page - 1) * page_size
+
+    async with pool.acquire() as conn:
+        if manager_id:
+            total = await conn.fetchval(
+                "SELECT COUNT(*) FROM persons_military WHERE added_by = $1",
+                manager_id
+            )
+            rows = await conn.fetch(
+                """
+                SELECT pm.*,
+                       (SELECT COUNT(*) FROM military_relatives mr
+                        WHERE mr.military_id = pm.id) AS relatives_count
+                FROM persons_military pm
+                WHERE pm.added_by = $1
+                ORDER BY pm.created_at DESC
+                LIMIT $2 OFFSET $3
+                """,
+                manager_id, page_size, offset
+            )
+        else:
+            total = await conn.fetchval("SELECT COUNT(*) FROM persons_military")
+            rows = await conn.fetch(
+                """
+                SELECT pm.*,
+                       (SELECT COUNT(*) FROM military_relatives mr
+                        WHERE mr.military_id = pm.id) AS relatives_count
+                FROM persons_military pm
+                ORDER BY pm.created_at DESC
+                LIMIT $1 OFFSET $2
+                """,
+                page_size, offset
+            )
+        return [dict(r) for r in rows], (total or 0)
+
+
+# ════════════════════════════════════════════════════════════
+#                       УДАЛЕНИЕ
+# ════════════════════════════════════════════════════════════
+
+async def delete_military_cascade(military_id: int) -> int:
+    """
+    Удалить военного. Каскадно удалит связки в military_relatives.
+    Также удаляет родственников которые были связаны ТОЛЬКО с этим военным
+    (если родственник связан и с другими — оставляем).
+    
+    Возвращает количество удалённых родственников.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # Находим родственников, привязанных только к этому военному
+            orphan_ids = await conn.fetch(
+                """
+                SELECT r.id FROM relatives r
+                WHERE EXISTS (
+                    SELECT 1 FROM military_relatives mr
+                    WHERE mr.relative_id = r.id AND mr.military_id = $1
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM military_relatives mr
+                    WHERE mr.relative_id = r.id AND mr.military_id != $1
+                )
+                """,
+                military_id
+            )
+            orphan_ids_list = [r['id'] for r in orphan_ids]
+
+            # Удаляем военного — связки в military_relatives удалятся каскадно (FK ON DELETE CASCADE)
+            await conn.execute("DELETE FROM persons_military WHERE id = $1", military_id)
+
+            # Удаляем "осиротевших" родственников
+            if orphan_ids_list:
+                await conn.execute(
+                    "DELETE FROM relatives WHERE id = ANY($1::int[])",
+                    orphan_ids_list
+                )
+
+            return len(orphan_ids_list)
+
+
+async def delete_relative_cascade(relative_id: int) -> None:
+    """
+    Удалить родственника полностью.
+    Связки в military_relatives удалятся каскадно (ON DELETE CASCADE).
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM relatives WHERE id = $1", relative_id)
+
+
+# ════════════════════════════════════════════════════════════
+#                       РЕДАКТИРОВАНИЕ РОДСТВЕННИКА
+# ════════════════════════════════════════════════════════════
+
+async def get_relative_by_id(relative_id: int) -> Optional[dict]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM relatives WHERE id = $1", relative_id)
+        return dict(row) if row else None
+
+
+async def update_relative_field(relative_id: int, field: str, value) -> None:
+    """
+    Обновить структурное поле родственника (full_name, birth_date, phone, address).
+    """
+    allowed = {"full_name", "birth_date", "phone", "address"}
+    if field not in allowed:
+        raise ValueError(f"Поле {field} не разрешено для прямого обновления")
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            f"UPDATE relatives SET {field} = $1, updated_at = NOW() WHERE id = $2",
+            value, relative_id
+        )
+
+
+async def update_relative_extra(relative_id: int, key: str, value) -> None:
+    """
+    Обновить/добавить поле в JSONB extra.
+    Если value = None или '' — удаляет ключ из extra.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if value is None or value == "":
+            await conn.execute(
+                "UPDATE relatives SET extra = extra - $2, updated_at = NOW() WHERE id = $1",
+                relative_id, key
+            )
+        else:
+            await conn.execute(
+                """
+                UPDATE relatives
+                SET extra = jsonb_set(COALESCE(extra, '{}'::jsonb), ARRAY[$2], to_jsonb($3::text)),
+                    updated_at = NOW()
+                WHERE id = $1
+                """,
+                relative_id, key, str(value)
+            )
+
+
+# ════════════════════════════════════════════════════════════
+#       ДУБЛИ РОДСТВЕННИКА С ИНФОЙ К КОМУ ПРИВЯЗАН
+# ════════════════════════════════════════════════════════════
+
+async def find_relative_duplicates_with_links(
+    full_name: str = None, birth_date=None,
+    phone: str = None, address: str = None
+) -> list:
+    """
+    Дубли родственника + список военных к которым он уже привязан.
+    Возвращает список dict с полем linked_to (список словарей с инфой о военных).
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT r.*,
+                   mgr.name as manager_name,
+                   (
+                       (CASE WHEN $1::text IS NOT NULL AND LOWER(r.full_name) = LOWER($1) THEN 1 ELSE 0 END) +
+                       (CASE WHEN $2::date IS NOT NULL AND r.birth_date = $2 THEN 1 ELSE 0 END) +
+                       (CASE WHEN $3::text IS NOT NULL AND r.phone = $3 THEN 1 ELSE 0 END) +
+                       (CASE WHEN $4::text IS NOT NULL AND LOWER(r.address) = LOWER($4) THEN 1 ELSE 0 END)
+                   ) as match_count,
+                   (
+                       SELECT COALESCE(
+                           json_agg(
+                               json_build_object(
+                                   'id', pm.id,
+                                   'full_name', pm.full_name,
+                                   'birth_date', pm.birth_date::text,
+                                   'status', pm.status
+                               )
+                           ),
+                           '[]'::json
+                       )
+                       FROM military_relatives mr
+                       JOIN persons_military pm ON pm.id = mr.military_id
+                       WHERE mr.relative_id = r.id
+                   ) as linked_to
+            FROM relatives r
+            LEFT JOIN managers mgr ON r.added_by = mgr.id
+            WHERE (
+                (CASE WHEN $1::text IS NOT NULL AND LOWER(r.full_name) = LOWER($1) THEN 1 ELSE 0 END) +
+                (CASE WHEN $2::date IS NOT NULL AND r.birth_date = $2 THEN 1 ELSE 0 END) +
+                (CASE WHEN $3::text IS NOT NULL AND r.phone = $3 THEN 1 ELSE 0 END) +
+                (CASE WHEN $4::text IS NOT NULL AND LOWER(r.address) = LOWER($4) THEN 1 ELSE 0 END)
+            ) >= 2
+            ORDER BY match_count DESC
+            """,
+            full_name, birth_date, phone, address
+        )
+        result = []
+        for r in rows:
+            d = dict(r)
+            # linked_to уже декодируется asyncpg в list[dict] через json_codec
+            # но если пришло строкой — парсим
+            import json as _json
+            if isinstance(d.get('linked_to'), str):
+                d['linked_to'] = _json.loads(d['linked_to'])
+            result.append(d)
+        return result
+
+
+# ════════════════════════════════════════════════════════════
+#                       ЭКСПОРТ
+# ════════════════════════════════════════════════════════════
+
+async def count_available_for_export(manager_id: int = None) -> int:
+    """
+    Сколько военных доступно для экспорта.
+    Условия:
+    - Есть хотя бы один привязанный родственник
+    - exported_at IS NULL (ещё не выгружали)
+    - Если manager_id указан — только записи этого менеджера
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if manager_id:
+            return await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM persons_military pm
+                WHERE pm.exported_at IS NULL
+                  AND pm.added_by = $1
+                  AND EXISTS (
+                      SELECT 1 FROM military_relatives mr
+                      WHERE mr.military_id = pm.id
+                  )
+                """,
+                manager_id
+            )
+        else:
+            return await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM persons_military pm
+                WHERE pm.exported_at IS NULL
+                  AND EXISTS (
+                      SELECT 1 FROM military_relatives mr
+                      WHERE mr.military_id = pm.id
+                  )
+                """
+            )
+
+
+async def fetch_military_for_export(manager_id: int = None, limit: int = None) -> list:
+    """
+    Военные с заполненными родственниками, не выгруженные ранее.
+    Сортировка: сначала старые (FIFO).
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        params = []
+        where = ["pm.exported_at IS NULL",
+                 "EXISTS (SELECT 1 FROM military_relatives mr WHERE mr.military_id = pm.id)"]
+
+        if manager_id:
+            where.append(f"pm.added_by = ${len(params) + 1}")
+            params.append(manager_id)
+
+        sql = f"""
+            SELECT pm.*, m.name AS manager_name
+            FROM persons_military pm
+            LEFT JOIN managers m ON pm.added_by = m.id
+            WHERE {' AND '.join(where)}
+            ORDER BY pm.created_at ASC
+        """
+        if limit:
+            sql += f" LIMIT ${len(params) + 1}"
+            params.append(limit)
+
+        rows = await conn.fetch(sql, *params)
+        return [dict(r) for r in rows]
+
+
+async def fetch_relatives_for_military_ids(military_ids: list[int]) -> list:
+    """
+    Все родственники привязанные к указанным военным +
+    к каким военным они привязаны (с учётом m2m).
+    
+    Возвращает: список dict с полем linked_military
+    (список dict {id, full_name, birth_date}) — все военные родственника,
+    включая тех, что не входят в military_ids.
+    """
+    if not military_ids:
+        return []
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT DISTINCT ON (r.id) r.*,
+                   mgr.name AS manager_name,
+                   (
+                       SELECT COALESCE(
+                           json_agg(
+                               json_build_object(
+                                   'id', pm2.id,
+                                   'full_name', pm2.full_name,
+                                   'birth_date', pm2.birth_date::text
+                               )
+                           ),
+                           '[]'::json
+                       )
+                       FROM military_relatives mr2
+                       JOIN persons_military pm2 ON pm2.id = mr2.military_id
+                       WHERE mr2.relative_id = r.id
+                   ) AS linked_military
+            FROM relatives r
+            LEFT JOIN managers mgr ON r.added_by = mgr.id
+            JOIN military_relatives mr ON mr.relative_id = r.id
+            WHERE mr.military_id = ANY($1::int[])
+            ORDER BY r.id, r.created_at ASC
+            """,
+            military_ids
+        )
+        result = []
+        import json as _json
+        for r in rows:
+            d = dict(r)
+            if isinstance(d.get('linked_military'), str):
+                d['linked_military'] = _json.loads(d['linked_military'])
+            result.append(d)
+        return result
+
+
+async def mark_military_exported(military_ids: list[int]) -> None:
+    """Пометить военных как выгруженных (exported_at = NOW())"""
+    if not military_ids:
+        return
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE persons_military SET exported_at = NOW() WHERE id = ANY($1::int[])",
+            military_ids
+        )
+
+
+async def update_military_extra_field(military_id: int, key: str, value: str) -> None:
+    """
+    Обновить одно поле в extra JSONB у военного.
+    Если поля нет — добавит, если есть — перезапишет.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE persons_military
+            SET extra = COALESCE(extra, '{}'::jsonb) || jsonb_build_object($2::text, $3::text),
+                updated_at = NOW()
+            WHERE id = $1
+            """,
+            military_id, key, value
+        )
+        
+        
+async def find_birth_date_by_name(full_name: str) -> "date | None":
+    """
+    Найти в БД дату рождения человека с таким же ФИО.
+    Ищем сначала среди родственников, потом среди военных.
+    Возвращаем первую найденную ДР или None.
+    """
+    if not full_name:
+        return None
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # Сначала родственники
+        row = await conn.fetchrow(
+            """
+            SELECT birth_date
+            FROM relatives
+            WHERE LOWER(full_name) = LOWER($1) AND birth_date IS NOT NULL
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            full_name
+        )
+        if row and row["birth_date"]:
+            return row["birth_date"]
+
+        # Потом военные
+        row = await conn.fetchrow(
+            """
+            SELECT birth_date
+            FROM persons_military
+            WHERE LOWER(full_name) = LOWER($1) AND birth_date IS NOT NULL
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            full_name
+        )
+        if row and row["birth_date"]:
+            return row["birth_date"]
+
+    return None
