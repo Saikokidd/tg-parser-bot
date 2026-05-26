@@ -839,3 +839,225 @@ async def find_birth_date_by_name(full_name: str) -> "date | None":
             return row["birth_date"]
 
     return None
+
+
+# ════════════════════════════════════════════════════════════
+#                       ЛОГ ПРОБИВОВ
+# ════════════════════════════════════════════════════════════
+
+async def insert_probiv_log(
+    provider: str,
+    context: str,
+    manager_id: int | None = None,
+    full_name: str | None = None,
+    birth_date=None,
+    cost: float = 0,
+    currency: str = "USD",
+    military_id: int | None = None,
+    success: bool = True,
+    error: str | None = None,
+) -> None:
+    """
+    Записать факт запроса к провайдеру пробива.
+
+    Вызывается всегда — даже при ошибках провайдера (за них часто платим).
+    Не бросает исключений наверх — учёт расходов не должен ломать основной флоу.
+
+    Args:
+        provider: 'sauron' / 'kody' / ...
+        context: 'auto' (автопробив лида) / 'next' (Пробить далее) /
+                 'tool' (скрипты) / 'other'
+        manager_id: ID менеджера или None для админских прогонов через tools/
+        full_name: ФИО пробиваемого
+        birth_date: ДР пробиваемого (date или None)
+        cost: стоимость запроса в валюте provider
+        currency: валюта (по умолчанию USD — как у Sauron)
+        military_id: ID военного, если пробив был сделан в его контексте
+        success: успешен ли запрос
+        error: текст ошибки если success=False (обрезается до 255 символов)
+    """
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO probiv_log (
+                    manager_id, provider, full_name, birth_date,
+                    cost, currency, context, military_id,
+                    success, error
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                """,
+                manager_id,
+                provider,
+                full_name,
+                birth_date,
+                cost,
+                currency,
+                context,
+                military_id,
+                success,
+                (error or "")[:255] if error else None,
+            )
+    except Exception:
+        # Сознательно подавляем любые ошибки логирования —
+        # учёт расходов не должен ронять пробив для пользователя.
+        import logging
+        logging.getLogger(__name__).exception("insert_probiv_log failed")
+        
+        
+# ════════════════════════════════════════════════════════════
+#                СТАТИСТИКА РАСХОДА НА ПРОБИВ
+# ════════════════════════════════════════════════════════════
+
+async def cost_stats_total(since=None) -> dict:
+    """
+    Сводный отчёт по ВСЕМ запросам к провайдерам пробива.
+    Включает все contexts ('auto', 'next', 'tool', 'other')
+    и привязанные/непривязанные к менеджеру записи.
+
+    Args:
+        since: datetime начала периода. None = всё время.
+
+    Returns:
+        dict с полями:
+          total_count, total_cost,
+          auto_count, auto_cost,
+          next_count, next_cost,
+          tool_count, tool_cost,
+          failed_count, failed_cost
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if since:
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    COUNT(*) AS total_count,
+                    COALESCE(SUM(cost), 0) AS total_cost,
+                    COUNT(*) FILTER (WHERE context = 'auto') AS auto_count,
+                    COALESCE(SUM(cost) FILTER (WHERE context = 'auto'), 0) AS auto_cost,
+                    COUNT(*) FILTER (WHERE context = 'next') AS next_count,
+                    COALESCE(SUM(cost) FILTER (WHERE context = 'next'), 0) AS next_cost,
+                    COUNT(*) FILTER (WHERE context = 'tool') AS tool_count,
+                    COALESCE(SUM(cost) FILTER (WHERE context = 'tool'), 0) AS tool_cost,
+                    COUNT(*) FILTER (WHERE success = FALSE) AS failed_count,
+                    COALESCE(SUM(cost) FILTER (WHERE success = FALSE), 0) AS failed_cost
+                FROM probiv_log
+                WHERE created_at >= $1
+                """,
+                since,
+            )
+        else:
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    COUNT(*) AS total_count,
+                    COALESCE(SUM(cost), 0) AS total_cost,
+                    COUNT(*) FILTER (WHERE context = 'auto') AS auto_count,
+                    COALESCE(SUM(cost) FILTER (WHERE context = 'auto'), 0) AS auto_cost,
+                    COUNT(*) FILTER (WHERE context = 'next') AS next_count,
+                    COALESCE(SUM(cost) FILTER (WHERE context = 'next'), 0) AS next_cost,
+                    COUNT(*) FILTER (WHERE context = 'tool') AS tool_count,
+                    COALESCE(SUM(cost) FILTER (WHERE context = 'tool'), 0) AS tool_cost,
+                    COUNT(*) FILTER (WHERE success = FALSE) AS failed_count,
+                    COALESCE(SUM(cost) FILTER (WHERE success = FALSE), 0) AS failed_cost
+                FROM probiv_log
+                """
+            )
+        return dict(row)
+
+
+async def cost_stats_by_manager(since=None) -> list[dict]:
+    """
+    Расходы по менеджерам, отсортированные по убыванию суммы.
+    Включает только записи с manager_id IS NOT NULL.
+
+    Возвращает список:
+      [{manager_id, name, is_active, total_count, total_cost,
+        auto_count, auto_cost, next_count, next_cost}, ...]
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if since:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    m.id AS manager_id,
+                    m.name,
+                    m.is_active,
+                    COUNT(pl.id) AS total_count,
+                    COALESCE(SUM(pl.cost), 0) AS total_cost,
+                    COUNT(pl.id) FILTER (WHERE pl.context = 'auto') AS auto_count,
+                    COALESCE(SUM(pl.cost) FILTER (WHERE pl.context = 'auto'), 0) AS auto_cost,
+                    COUNT(pl.id) FILTER (WHERE pl.context = 'next') AS next_count,
+                    COALESCE(SUM(pl.cost) FILTER (WHERE pl.context = 'next'), 0) AS next_cost
+                FROM probiv_log pl
+                JOIN managers m ON m.id = pl.manager_id
+                WHERE pl.created_at >= $1
+                GROUP BY m.id, m.name, m.is_active
+                HAVING COUNT(pl.id) > 0
+                ORDER BY total_cost DESC, m.name
+                """,
+                since,
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    m.id AS manager_id,
+                    m.name,
+                    m.is_active,
+                    COUNT(pl.id) AS total_count,
+                    COALESCE(SUM(pl.cost), 0) AS total_cost,
+                    COUNT(pl.id) FILTER (WHERE pl.context = 'auto') AS auto_count,
+                    COALESCE(SUM(pl.cost) FILTER (WHERE pl.context = 'auto'), 0) AS auto_cost,
+                    COUNT(pl.id) FILTER (WHERE pl.context = 'next') AS next_count,
+                    COALESCE(SUM(pl.cost) FILTER (WHERE pl.context = 'next'), 0) AS next_cost
+                FROM probiv_log pl
+                JOIN managers m ON m.id = pl.manager_id
+                GROUP BY m.id, m.name, m.is_active
+                HAVING COUNT(pl.id) > 0
+                ORDER BY total_cost DESC, m.name
+                """
+            )
+        return [dict(r) for r in rows]
+
+
+async def cost_stats_no_attach(since=None) -> dict:
+    """
+    Расходы НЕ привязанные к менеджеру (manager_id IS NULL).
+    Обычно это запуски tools/enrich_missing_data.py через cron/админа.
+
+    Returns:
+        dict с полями: total_count, total_cost,
+                       failed_count, failed_cost.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if since:
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    COUNT(*) AS total_count,
+                    COALESCE(SUM(cost), 0) AS total_cost,
+                    COUNT(*) FILTER (WHERE success = FALSE) AS failed_count,
+                    COALESCE(SUM(cost) FILTER (WHERE success = FALSE), 0) AS failed_cost
+                FROM probiv_log
+                WHERE manager_id IS NULL AND created_at >= $1
+                """,
+                since,
+            )
+        else:
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    COUNT(*) AS total_count,
+                    COALESCE(SUM(cost), 0) AS total_cost,
+                    COUNT(*) FILTER (WHERE success = FALSE) AS failed_count,
+                    COALESCE(SUM(cost) FILTER (WHERE success = FALSE), 0) AS failed_cost
+                FROM probiv_log
+                WHERE manager_id IS NULL
+                """
+            )
+        return dict(row)

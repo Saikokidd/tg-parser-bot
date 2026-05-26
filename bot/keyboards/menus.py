@@ -40,6 +40,7 @@ def main_menu(is_admin: bool = False, is_supervisor: bool = False) -> ReplyKeybo
 def admin_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👥 Менеджеры", callback_data="admin:managers")],
+        [InlineKeyboardButton(text="💰 Расход на пробив", callback_data="admin:cost")],
     ])
 
 
@@ -462,4 +463,74 @@ def export_count_kb(available: int) -> InlineKeyboardMarkup:
         )],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="export:cancel")],
     ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# ════════════════════════════════════════════════════════════
+#                  РАСХОД НА ПРОБИВ (АДМИН)
+# ════════════════════════════════════════════════════════════
+
+def cost_menu_kb() -> InlineKeyboardMarkup:
+    """Главное меню раздела 'Расход на пробив'"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Общий", callback_data="cost:total")],
+        [InlineKeyboardButton(text="👤 По менеджерам", callback_data="cost:by_mgr")],
+        [InlineKeyboardButton(text="🤖 Без привязки", callback_data="cost:noattach")],
+        [InlineKeyboardButton(text="« Назад", callback_data="admin:back")],
+    ])
+
+
+def cost_period_kb(section: str, period: str = "week",
+                   page: int = 0, total_pages: int = 1) -> InlineKeyboardMarkup:
+    """
+    Клавиатура раздела расхода.
+
+    section: 'total' / 'by_mgr' / 'noattach'
+    period:  'week' / 'month' / 'all'
+    page, total_pages: для пагинации (используется только в by_mgr)
+    """
+    rows = []
+
+    # Пагинация (только для by_mgr и только если страниц больше одной)
+    if section == "by_mgr" and total_pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(
+                text="◀",
+                callback_data=f"cost:by_mgr:{period}:{page - 1}",
+            ))
+        nav.append(InlineKeyboardButton(
+            text=f"{page + 1}/{total_pages}",
+            callback_data="cost:noop",
+        ))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton(
+                text="▶",
+                callback_data=f"cost:by_mgr:{period}:{page + 1}",
+            ))
+        rows.append(nav)
+
+    # Кнопки периодов с маркером текущего
+    def label(text, p):
+        return f"• {text} •" if p == period else text
+
+    # Для каждого периода — свой callback в зависимости от раздела.
+    # by_mgr → cost:by_mgr:{period}:0  (страница всегда сбрасывается на 0)
+    # остальные → cost:{section}:{period}
+    def cb(p):
+        if section == "by_mgr":
+            return f"cost:by_mgr:{p}:0"
+        return f"cost:{section}:{p}"
+
+    rows.append([
+        InlineKeyboardButton(text=label("Неделя", "week"), callback_data=cb("week")),
+        InlineKeyboardButton(text=label("Месяц", "month"), callback_data=cb("month")),
+    ])
+    rows.append([
+        InlineKeyboardButton(text=label("Всё время", "all"), callback_data=cb("all")),
+    ])
+    rows.append([
+        InlineKeyboardButton(text="« К меню расхода", callback_data="admin:cost"),
+    ])
+
     return InlineKeyboardMarkup(inline_keyboard=rows)

@@ -54,8 +54,27 @@ async def run_probiv_after_save(
     """
     status_msg = await target.answer("🔍 Пробиваю через Sauron на наличие возможных связей...")
 
+    # Берём manager_id из FSM — он туда кладётся хендлерами
+    fsm_data = await state.get_data()
+    manager_id = fsm_data.get("manager_id") or fsm_data.get("saved_manager_id")
+    # saved_manager_id используется при автопробиве после создания военного,
+    # manager_id — при "Заполнить → Пробить через Sauron"
+
+    # Диагностика: если manager_id не подтянулся — пишем в лог что было в FSM.
+    # Это поможет найти все возможные ветки кода где manager_id не сохраняется.
+    if manager_id is None:
+        logger.warning(
+            f"run_probiv_after_save: manager_id is None для {full_name} "
+            f"(military_id={military_id}). FSM keys: {list(fsm_data.keys())}"
+        )
+
     try:
-        result: ProbivResult = await probit_person(full_name, birth_date)
+        result: ProbivResult = await probit_person(
+            full_name, birth_date,
+            manager_id=manager_id,
+            context="auto",
+            military_id=military_id,
+        )
     except ValueError as e:
         await status_msg.edit_text(f"⚠️ Пробив не запущен: {e}")
         return
@@ -105,7 +124,7 @@ async def run_probiv_after_save(
 # ════════════════════════════════════════════════════════════
 
 @router.callback_query(F.data.startswith("probiv:next:"))
-async def probiv_next(callback: CallbackQuery, state: FSMContext):
+async def probiv_next(callback: CallbackQuery, state: FSMContext, manager: dict | None = None):
     # Сразу подтверждаем нажатие — защита от тройного срабатывания при двойном клике
     await callback.answer()
 
@@ -143,8 +162,14 @@ async def probiv_next(callback: CallbackQuery, state: FSMContext):
         parse_mode="Markdown"
     )
 
+    manager_id = manager["id"] if manager else None
+
     try:
-        result: ProbivResult = await probit_person(full_name, birth_date)
+        result: ProbivResult = await probit_person(
+            full_name, birth_date,
+            manager_id=manager_id,
+            context="next",
+        )
     except ValueError as e:
         # ФИО не прошло валидацию (например, после очистки от "Оглы" не хватает слов)
         await status_msg.edit_text(

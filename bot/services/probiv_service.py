@@ -12,6 +12,7 @@ from typing import Optional
 from bot.services import sauron_api
 from bot.parser import sauron_parser
 from bot.services import voxlink_service, email_validator_service
+from bot.db.queries import insert_probiv_log
 
 logger = logging.getLogger(__name__)
 
@@ -70,13 +71,24 @@ async def _probit_sauron(full_name: str, birth_date) -> dict:
 
 # ──────────── Главная функция ────────────
 
-async def probit_person(full_name: str, birth_date=None) -> ProbivResult:
+async def probit_person(
+    full_name: str,
+    birth_date=None,
+    manager_id: int | None = None,
+    context: str = "other",
+    military_id: int | None = None,
+) -> ProbivResult:
     """
     Сделать пробив человека через все доступные провайдеры (параллельно).
     Объединить результаты в ProbivResult.
 
-    full_name — полное ФИО (минимум "Фамилия Имя")
-    birth_date — datetime.date или None
+    Args:
+        full_name: полное ФИО (минимум "Фамилия Имя")
+        birth_date: datetime.date или None
+        manager_id: ID менеджера запустившего пробив. None для админских/tool-прогонов.
+        context: 'auto' / 'next' / 'tool' / 'other' — откуда вызван пробив.
+                 Влияет только на учёт в probiv_log, не на саму логику.
+        military_id: ID военного, если пробив привязан к нему (для 'auto').
     """
     result = ProbivResult()
 
@@ -89,15 +101,43 @@ async def probit_person(full_name: str, birth_date=None) -> ProbivResult:
     # Параллельный запрос с обработкой ошибок отдельно
     raw = await asyncio.gather(*providers, return_exceptions=True)
 
-    for item in raw:
+    # Имена провайдеров параллельно для логирования (тот же порядок что в providers)
+    provider_names = ["sauron"]
+
+    for prov_name, item in zip(provider_names, raw):
         if isinstance(item, Exception):
             err_msg = f"{type(item).__name__}: {item}"
             logger.warning(f"Probiv provider error: {err_msg}")
             result.errors.append(err_msg)
+
+            # Логируем неудачный запрос (Sauron часто берёт деньги даже за ошибки)
+            await insert_probiv_log(
+                provider=prov_name,
+                context=context,
+                manager_id=manager_id,
+                full_name=full_name,
+                birth_date=birth_date,
+                cost=0,
+                military_id=military_id,
+                success=False,
+                error=err_msg,
+            )
             continue
 
         result.raw_results.append(item)
         result.total_cost += item.get("cost", 0)
+
+        # Логируем успешный запрос
+        await insert_probiv_log(
+            provider=prov_name,
+            context=context,
+            manager_id=manager_id,
+            full_name=full_name,
+            birth_date=birth_date,
+            cost=item.get("cost", 0),
+            military_id=military_id,
+            success=True,
+        )
 
     if not result.raw_results:
         # Все провайдеры упали

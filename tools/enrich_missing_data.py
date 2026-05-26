@@ -29,6 +29,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from bot.db.connection import get_pool, close_pool
 from bot.services.sauron_api import query_person, split_full_name, SauronError
+from bot.db.queries import insert_probiv_log
 from bot.services.voxlink_service import lookup_phone
 from bot.services.email_validator_service import validate_emails_parallel
 from bot.parser.sauron_parser import build_relative_template
@@ -147,13 +148,44 @@ async def process_one(rel: dict, dry_run: bool, log_lines: list, stats: dict):
             month=birth_date.month,
             year=birth_date.year,
         )
+        # Логируем расход — успешный запрос
+        await insert_probiv_log(
+            provider="sauron",
+            context="tool",
+            manager_id=None,  # скрипт запускается админом, к менеджеру не привязан
+            full_name=full_name,
+            birth_date=birth_date,
+            cost=float(result.get("cost", 0) or 0),
+            success=True,
+        )
     except SauronError as e:
         log_lines.append(f"[#{rel_id}] {full_name}: SAURON ERROR — {e}")
         stats["sauron_errors"] += 1
+        # Логируем расход — неудача (часто оплачивается)
+        await insert_probiv_log(
+            provider="sauron",
+            context="tool",
+            manager_id=None,
+            full_name=full_name,
+            birth_date=birth_date,
+            cost=0,
+            success=False,
+            error=str(e),
+        )
         return
     except Exception as e:
         log_lines.append(f"[#{rel_id}] {full_name}: UNEXPECTED — {e}")
         stats["sauron_errors"] += 1
+        await insert_probiv_log(
+            provider="sauron",
+            context="tool",
+            manager_id=None,
+            full_name=full_name,
+            birth_date=birth_date,
+            cost=0,
+            success=False,
+            error=str(e),
+        )
         return
 
     # Собираем шаблон

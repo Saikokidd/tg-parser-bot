@@ -153,11 +153,13 @@ async def _save_and_probit(target: Message, state: FSMContext, parsed: dict, man
     )
 
     # Сохраняем military_id и базовые данные в FSM, чтобы продолжить флоу
-    # после ответа менеджера на запрос источника
+    # после ответа менеджера на запрос источника.
+    # manager_id нужен для учёта расходов на пробив (probiv_log).
     await state.update_data(
         saved_military_id=record["id"],
         saved_full_name=parsed["full_name"],
         saved_birth_date=parsed.get("birth_date"),
+        saved_manager_id=manager_id,
     )
     await state.set_state(MilitaryStates.waiting_source)
 

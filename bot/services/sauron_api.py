@@ -113,7 +113,7 @@ async def query_person(
     cost = result.get("cost", "?")
     balance = result.get("balance", "?")
     total = result.get("response", {}).get("total", 0)
-    logger.info(f"Sauron: cost={cost}₽ balance={balance}₽ records={total}")
+    logger.info(f"Sauron: cost=${cost} balance=${balance} records={total}")
 
     return result
 
