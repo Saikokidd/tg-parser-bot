@@ -19,6 +19,7 @@ from bot.services.probiv_service import (
     probit_person, format_probiv_result, ProbivResult
 )
 from bot.parser.sauron_parser import format_relative_template
+from bot.parser.relative_parser import normalize_phone
 from bot.keyboards.menus import (
     probiv_persons_kb,
     attach_relative_kb,
@@ -46,11 +47,14 @@ async def run_probiv_after_save(
     full_name: str,
     birth_date: date | None,
     military_id: int | None = None,
+    office: str | None = None,
 ):
     """
-    Вызывается из military.py после успешного сохранения военного.
-    Делает пробив и кладёт результат в FSM (для последующих "Пробить далее").
-    target — сообщение в чат которого пишем ответы.
+    Вызывается из military.py / relatives.py после успешного сохранения военного
+    или при ручном запуске пробива.
+
+    office определяет на какой счёт Sauron спишутся деньги — pvl или dp.
+    Если None — пробив завершится ошибкой "офис не указан".
     """
     status_msg = await target.answer("🔍 Пробиваю через Sauron на наличие возможных связей...")
 
@@ -60,6 +64,11 @@ async def run_probiv_after_save(
     # saved_manager_id используется при автопробиве после создания военного,
     # manager_id — при "Заполнить → Пробить через Sauron"
 
+    # Office — на какой счёт Sauron списать. Если хендлер забыл передать,
+    # пробуем достать из FSM (на случай если он там лежит).
+    if office is None:
+        office = fsm_data.get("office") or fsm_data.get("saved_office")
+
     # Диагностика: если manager_id не подтянулся — пишем в лог что было в FSM.
     # Это поможет найти все возможные ветки кода где manager_id не сохраняется.
     if manager_id is None:
@@ -68,12 +77,23 @@ async def run_probiv_after_save(
             f"(military_id={military_id}). FSM keys: {list(fsm_data.keys())}"
         )
 
+    # Без office дальше не идём — иначе спишутся деньги с дефолтного счёта.
+    if not office:
+        logger.warning(
+            f"run_probiv_after_save: office is None для {full_name}. FSM keys: {list(fsm_data.keys())}"
+        )
+        await status_msg.edit_text(
+            "⚠️ У вас не указан офис. Обратитесь к админу."
+        )
+        return
+
     try:
         result: ProbivResult = await probit_person(
             full_name, birth_date,
             manager_id=manager_id,
             context="auto",
             military_id=military_id,
+            office=office,
         )
     except ValueError as e:
         await status_msg.edit_text(f"⚠️ Пробив не запущен: {e}")
@@ -163,12 +183,20 @@ async def probiv_next(callback: CallbackQuery, state: FSMContext, manager: dict 
     )
 
     manager_id = manager["id"] if manager else None
+    office = manager.get("office") if manager else None
+
+    if not office:
+        await callback.message.answer(
+            "⚠️ У вас не указан офис. Обратитесь к админу."
+        )
+        return
 
     try:
         result: ProbivResult = await probit_person(
             full_name, birth_date,
             manager_id=manager_id,
             context="next",
+            office=office,
         )
     except ValueError as e:
         # ФИО не прошло валидацию (например, после очистки от "Оглы" не хватает слов)
@@ -289,7 +317,7 @@ def _build_relative_data_from_template(template: dict) -> dict:
     return {
         "full_name": template.get("full_name"),
         "birth_date": birth_date,
-        "phone": template.get("phone"),
+        "phone": normalize_phone(template.get("phone")),
         "address": template.get("address"),
         "extra": extra,
     }

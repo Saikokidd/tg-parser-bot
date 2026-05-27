@@ -148,6 +148,13 @@ async def relative_probiv_entry(callback: CallbackQuery, state: FSMContext, mana
         await callback.message.edit_text("⚠️ Запись не найдена.")
         return
 
+    office = manager.get('office')
+    if not office:
+        await callback.message.edit_text(
+            "⚠️ У вас не указан офис. Обратитесь к админу."
+        )
+        return
+
     # Очищаем сообщение с кнопками
     await callback.message.edit_text(
         f"🔍 Запускаю пробив *{military['full_name']}* через Sauron...",
@@ -162,6 +169,7 @@ async def relative_probiv_entry(callback: CallbackQuery, state: FSMContext, mana
         full_name=military['full_name'],
         birth_date=military.get('birth_date'),
         military_id=military_id,
+        office=office,
     )
 
 

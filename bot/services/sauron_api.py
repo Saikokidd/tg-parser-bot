@@ -21,6 +21,35 @@ logger = logging.getLogger(__name__)
 API_BASE = "https://api.sauron.info/v1/query/get"
 TIMEOUT_SEC = 60
 
+# ──────────── Выбор токена по офису ────────────
+
+def _get_token_for_office(office: str | None) -> str:
+    """
+    Получить Sauron API токен для указанного офиса.
+
+    Каждый офис имеет свой счёт в Sauron — токены лежат в .env как
+    SAURON_TOKEN_PVL и SAURON_TOKEN_DP.
+
+    Если office=None или неизвестный код — бросаем SauronError.
+    Это защита от случайных пробивов без указания офиса.
+    """
+    if not office:
+        raise SauronError(
+            "Не указан office для запроса в Sauron. "
+            "У менеджера должен быть назначен офис (pvl или dp)."
+        )
+
+    office = office.lower()
+    env_var = f"SAURON_TOKEN_{office.upper()}"
+    token = os.getenv(env_var)
+
+    if not token:
+        raise SauronError(
+            f"Не задан токен для офиса '{office}'. "
+            f"Проверь переменную {env_var} в .env."
+        )
+
+    return token
 
 class SauronError(Exception):
     """Любая ошибка при работе с API"""
@@ -39,14 +68,24 @@ class SauronBalanceError(SauronError):
 
 # ──────────── Внутренний хелпер ────────────
 
-async def _post(endpoint: str, payload: dict) -> dict:
+async def _post(endpoint: str, payload: dict, office: str | None = None) -> dict:
     """
     Универсальная отправка POST-запроса к API.
-    Возвращает result из ответа или бросает SauronError.
+
+    office определяет какой токен (счёт) использовать — pvl или dp.
+    Если office=None, пробует прочитать SAURON_TOKEN из .env (обратная
+    совместимость; будет убрано после миграции всех вызовов).
     """
-    token = os.getenv("SAURON_TOKEN")
-    if not token:
-        raise SauronError("SAURON_TOKEN не задан в .env")
+    if office:
+        token = _get_token_for_office(office)
+    else:
+        # Fallback на старую переменную — для совместимости.
+        # После полной миграции эту ветку нужно убрать.
+        token = os.getenv("SAURON_TOKEN")
+        if not token:
+            raise SauronError(
+                "Не указан office для запроса и SAURON_TOKEN не задан в .env."
+            )
 
     payload["token"] = token
     url = f"{API_BASE}/{endpoint}"
@@ -85,11 +124,14 @@ async def query_person(
     day: Optional[int] = None,
     month: Optional[int] = None,
     year: Optional[int] = None,
-    country: str = "RU"
+    country: str = "RU",
+    office: str | None = None,
 ) -> dict:
     """
     Пробить человека по ФИО (+опц. дате рождения).
     Возвращает result из ответа sauron — со всеми записями из разных источников.
+
+    office: 'pvl' / 'dp' — какой счёт списать. Если None, читается SAURON_TOKEN.
     """
     payload = {
         "country": country,
@@ -105,10 +147,10 @@ async def query_person(
     if year:
         payload["year"] = year
 
-    logger.info(f"Sauron: пробив {lastname} {firstname} {middlename or ''} "
+    logger.info(f"Sauron[{office or 'default'}]: пробив {lastname} {firstname} {middlename or ''} "
                 f"{f'{day:02d}.{month:02d}.{year}' if day else ''}")
 
-    result = await _post("person", payload)
+    result = await _post("person", payload, office=office)
 
     cost = result.get("cost", "?")
     balance = result.get("balance", "?")
@@ -118,13 +160,13 @@ async def query_person(
     return result
 
 
-async def query_phone(phone: str, parser: bool = False) -> dict:
+async def query_phone(phone: str, parser: bool = False, office: str | None = None) -> dict:
     """Пробить по номеру телефона. Не используется в основном флоу, на будущее."""
     payload = {
         "phone": phone,
         "parser": "1" if parser else "0",
     }
-    return await _post("phone", payload)
+    return await _post("phone", payload, office=office)
 
 
 # ──────────── Утилита: разбить ФИО ────────────

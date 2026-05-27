@@ -100,7 +100,11 @@ async def receive_template(message: Message, state: FSMContext, manager: dict):
 
     if duplicates:
         # Дубль найден — спрашиваем подтверждения
-        await state.update_data(parsed=parsed, manager_id=manager['id'])
+        await state.update_data(
+            parsed=parsed,
+            manager_id=manager['id'],
+            manager_office=manager.get('office'),
+        )
         await state.set_state(MilitaryStates.waiting_dup_decision)
 
         dup_text = "\n\n".join([format_military_record(d) for d in duplicates])
@@ -115,7 +119,7 @@ async def receive_template(message: Message, state: FSMContext, manager: dict):
 
     # Дублей нет — сохраняем автоматически
     await status_msg.edit_text("✅ Дубликатов не выявлено")
-    await _save_and_probit(message, state, parsed, manager['id'])
+    await _save_and_probit(message, state, parsed, manager['id'], manager.get('office'))
 
 
 # ──────────── ОБРАБОТКА РЕШЕНИЯ ПО ДУБЛЮ ────────────
@@ -125,10 +129,11 @@ async def confirm_save_with_dup(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     parsed = data['parsed']
     manager_id = data['manager_id']
+    manager_office = data.get('manager_office')
 
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.answer()
-    await _save_and_probit(callback.message, state, parsed, manager_id)
+    await _save_and_probit(callback.message, state, parsed, manager_id, manager_office)
 
 
 @router.callback_query(F.data == "mil:cancel", MilitaryStates.waiting_dup_decision)
@@ -139,11 +144,13 @@ async def cancel_save_with_dup(callback: CallbackQuery, state: FSMContext):
 
 # ──────────── ОБЩАЯ ЛОГИКА: сохранение + пробив ────────────
 
-async def _save_and_probit(target: Message, state: FSMContext, parsed: dict, manager_id: int):
+async def _save_and_probit(target: Message, state: FSMContext, parsed: dict,
+                            manager_id: int, manager_office: str | None):
     """
     Сохраняет военного в БД. После сохранения спрашивает источник.
     После ввода источника (или /skip) — запускает пробив.
     target — сообщение, в чат которого слать ответы.
+    manager_office — 'pvl' / 'dp', нужен для выбора счёта Sauron.
     """
     record = await insert_military(parsed, manager_id)
     await target.answer(
@@ -154,12 +161,13 @@ async def _save_and_probit(target: Message, state: FSMContext, parsed: dict, man
 
     # Сохраняем military_id и базовые данные в FSM, чтобы продолжить флоу
     # после ответа менеджера на запрос источника.
-    # manager_id нужен для учёта расходов на пробив (probiv_log).
+    # manager_id и office нужны для пробива (учёт + выбор счёта Sauron).
     await state.update_data(
         saved_military_id=record["id"],
         saved_full_name=parsed["full_name"],
         saved_birth_date=parsed.get("birth_date"),
         saved_manager_id=manager_id,
+        saved_office=manager_office,
     )
     await state.set_state(MilitaryStates.waiting_source)
 

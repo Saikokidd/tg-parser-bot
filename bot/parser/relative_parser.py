@@ -64,10 +64,13 @@ def parse_date(text: str) -> Optional[date]:
 
 # ────────── Нормализация телефона ──────────
 
-def normalize_phone(phone: str) -> str:
-    digits = re.sub(r'\D', '', phone)
+def _normalize_single_phone(digits: str) -> str:
+    """
+    Привести один номер (только цифры) к виду '+...'.
+    Дефолт — российский (+7), украинские номера в БД не используются.
+    """
     if not digits:
-        return phone.strip()
+        return ""
     if digits.startswith('8') and len(digits) == 11:
         digits = '7' + digits[1:]
     if digits.startswith('380') and len(digits) == 12:
@@ -75,8 +78,89 @@ def normalize_phone(phone: str) -> str:
     if digits.startswith('7') and len(digits) == 11:
         return '+' + digits
     if len(digits) == 10:
-        return '+38' + digits
+        # 10 цифр без кода страны — считаем российским мобильным
+        return '+7' + digits
     return '+' + digits
+
+
+def normalize_phone(phone) -> str | None:
+    """
+    Нормализовать строку телефона до '+...'.
+
+    Поддерживает любые форматы: с пробелами, тире, скобками, без них.
+    Если в строке несколько номеров — возвращает первый.
+    Для извлечения всех номеров используй extract_all_phones().
+
+    Возвращает None если на вход пришло None, пустая строка или строка
+    из которой не удалось извлечь ни одного валидного номера.
+
+    Логика:
+    1. Если в строке после удаления нецифровых символов получается ровно один
+       номер по длине (10/11/12 цифр) — это один телефон, нормализуем сразу.
+       Покрывает '+7 912 345-67-89', '+7(912)345-67-89', '89123456789' и т.п.
+    2. Иначе вызываем extract_all_phones — он разделит несколько номеров
+       по разделителям и слипшиеся.
+    """
+    if not phone:
+        return None
+    s = str(phone).strip()
+    if not s:
+        return None
+    # Если вся строка — один телефон по количеству цифр, нормализуем сразу.
+    # Это покрывает форматы с пробелами/тире/скобками внутри одного номера.
+    digits = re.sub(r'\D', '', s)
+    if len(digits) in (10, 11, 12):
+        return _normalize_single_phone(digits)
+    # Иначе пробуем извлечь несколько номеров через разделители.
+    phones = extract_all_phones(s)
+    return phones[0] if phones else None
+
+
+def extract_all_phones(phone_str: str) -> list[str]:
+    """
+    Извлечь все номера телефонов из строки.
+
+    Поддерживает любые разделители (пробелы, запятые, слэши, переносы)
+    + случай когда несколько номеров слиплись без разделителей.
+
+    Возвращает список нормализованных номеров (с '+').
+    """
+    if not phone_str:
+        return []
+
+    # Разбиваем по любым разделителям (пробел, запятая, точка с запятой, слэш, перенос)
+    chunks = re.split(r'[\s,;/\n]+', phone_str.strip())
+
+    phones = []
+    for chunk in chunks:
+        digits = re.sub(r'\D', '', chunk)
+        if not digits:
+            continue
+
+        # Если в одном куске сразу несколько слипшихся номеров — режем
+        # Российский с кодом: 11 цифр (начинается с 7 или 8)
+        # Украинский с кодом: 12 цифр (начинается с 380)
+        # Без кода: 10 цифр
+        while digits:
+            if len(digits) <= 12 and 10 <= len(digits) <= 12:
+                # Один номер — добавляем и выходим
+                phones.append(_normalize_single_phone(digits))
+                break
+            elif digits.startswith('380') and len(digits) >= 12:
+                phones.append(_normalize_single_phone(digits[:12]))
+                digits = digits[12:]
+            elif (digits.startswith('7') or digits.startswith('8')) and len(digits) >= 11:
+                phones.append(_normalize_single_phone(digits[:11]))
+                digits = digits[11:]
+            elif len(digits) >= 10:
+                # Без кода — берём первые 10
+                phones.append(_normalize_single_phone(digits[:10]))
+                digits = digits[10:]
+            else:
+                # Огрызок меньше 10 цифр — игнорируем
+                break
+
+    return phones
 
 
 # ────────── Главный парсер ──────────
@@ -122,7 +206,12 @@ def parse_relative(text: str) -> dict:
             if d:
                 result['birth_date'] = d
         elif field == 'phone':
-            result['phone'] = normalize_phone(value)
+            phones = extract_all_phones(value)
+            if phones:
+                result['phone'] = phones[0]
+                if len(phones) > 1:
+                    # Дополнительные номера — в extra.phones_other через запятую
+                    result['extra']['phones_other'] = ", ".join(phones[1:])
         elif field == 'address':
             result['address'] = value
         elif field == 'snils':

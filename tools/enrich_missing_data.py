@@ -53,26 +53,34 @@ async def fetch_relatives_to_enrich(limit: int | None = None, manager_id: int | 
     - phone IS NULL OR phone=''
     - есть ФИО (хотя бы фамилия + имя)
     - есть ДР (без него Sauron бесполезен)
+    - менеджер-владелец имеет назначенный office (pvl или dp)
+      — без этого мы не знаем какой счёт Sauron использовать.
 
     manager_id — если указан, только записи этого менеджера
+
+    Возвращаемые поля включают office менеджера, чтобы process_one
+    знал на какой счёт списать запрос.
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
         sql = """
-            SELECT id, full_name, birth_date, address, extra
-            FROM relatives
-            WHERE (phone IS NULL OR phone = '')
-              AND birth_date IS NOT NULL
-              AND full_name IS NOT NULL
-              AND TRIM(full_name) != ''
-              AND ARRAY_LENGTH(STRING_TO_ARRAY(TRIM(full_name), ' '), 1) >= 2
+            SELECT r.id, r.full_name, r.birth_date, r.address, r.extra,
+                   m.id AS manager_id, m.office AS manager_office
+            FROM relatives r
+            JOIN managers m ON m.id = r.added_by
+            WHERE (r.phone IS NULL OR r.phone = '')
+              AND r.birth_date IS NOT NULL
+              AND r.full_name IS NOT NULL
+              AND TRIM(r.full_name) != ''
+              AND ARRAY_LENGTH(STRING_TO_ARRAY(TRIM(r.full_name), ' '), 1) >= 2
+              AND m.office IS NOT NULL
         """
         params = []
         if manager_id is not None:
-            sql += f"\n  AND added_by = ${len(params) + 1}"
+            sql += f"\n  AND r.added_by = ${len(params) + 1}"
             params.append(manager_id)
 
-        sql += "\nORDER BY id"
+        sql += "\nORDER BY r.id"
         if limit:
             sql += f"\nLIMIT {limit}"
 
@@ -126,10 +134,17 @@ async def process_one(rel: dict, dry_run: bool, log_lines: list, stats: dict):
     """
     Обработать одного родственника:
     Sauron → шаблон → voxlink + smtp.bz → запись в БД
+
+    Использует office родственника (унаследованный от его менеджера)
+    чтобы списать с правильного счёта Sauron.
+    Также пишет в probiv_log с указанием manager_id — это позволяет
+    разделить расход 'tool'-прогонов по офисам в отчётах.
     """
     rel_id = rel["id"]
     full_name = rel["full_name"]
     birth_date = rel["birth_date"]
+    manager_id = rel["manager_id"]
+    office = rel["manager_office"]
 
     try:
         ln, fn, mn = split_full_name(full_name)
@@ -138,7 +153,7 @@ async def process_one(rel: dict, dry_run: bool, log_lines: list, stats: dict):
         stats["skipped_bad_name"] += 1
         return
 
-    # Пробив через Sauron
+    # Пробив через Sauron (на счёт офиса менеджера)
     try:
         result = await query_person(
             lastname=ln,
@@ -147,16 +162,20 @@ async def process_one(rel: dict, dry_run: bool, log_lines: list, stats: dict):
             day=birth_date.day,
             month=birth_date.month,
             year=birth_date.year,
+            office=office,
         )
-        # Логируем расход — успешный запрос
+        # Логируем расход — успешный запрос.
+        # manager_id указываем настоящий (а не None как раньше) —
+        # чтобы можно было фильтровать tool-прогоны по офису.
         await insert_probiv_log(
             provider="sauron",
             context="tool",
-            manager_id=None,  # скрипт запускается админом, к менеджеру не привязан
+            manager_id=manager_id,
             full_name=full_name,
             birth_date=birth_date,
             cost=float(result.get("cost", 0) or 0),
             success=True,
+            office=office,
         )
     except SauronError as e:
         log_lines.append(f"[#{rel_id}] {full_name}: SAURON ERROR — {e}")
@@ -165,12 +184,13 @@ async def process_one(rel: dict, dry_run: bool, log_lines: list, stats: dict):
         await insert_probiv_log(
             provider="sauron",
             context="tool",
-            manager_id=None,
+            manager_id=manager_id,
             full_name=full_name,
             birth_date=birth_date,
             cost=0,
             success=False,
             error=str(e),
+            office=office,
         )
         return
     except Exception as e:
@@ -179,12 +199,13 @@ async def process_one(rel: dict, dry_run: bool, log_lines: list, stats: dict):
         await insert_probiv_log(
             provider="sauron",
             context="tool",
-            manager_id=None,
+            manager_id=manager_id,
             full_name=full_name,
             birth_date=birth_date,
             cost=0,
             success=False,
             error=str(e),
+            office=office,
         )
         return
 

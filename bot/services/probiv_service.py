@@ -37,9 +37,14 @@ class ProbivResult:
 
 # ──────────── Запуск пробива у одного провайдера ────────────
 
-async def _probit_sauron(full_name: str, birth_date) -> dict:
+async def _probit_sauron(full_name: str, birth_date, office: str | None = None) -> dict:
     """
     Сделать запрос к Sauron API.
+
+    office определяет с какого счёта списать деньги:
+      'pvl' — мой офис
+      'dp'  — офис партнёра
+
     Возвращает {'provider', 'data', 'cost'} или бросает исключение.
     """
     try:
@@ -49,12 +54,13 @@ async def _probit_sauron(full_name: str, birth_date) -> dict:
 
     # Логируем намерение запроса — поможет понять "почему мало данных" в будущем
     bd_str = birth_date.strftime("%d.%m.%Y") if birth_date else "БЕЗ ДР"
-    logger.info(f"_probit_sauron: {full_name} ({bd_str})")
+    logger.info(f"_probit_sauron[{office or 'default'}]: {full_name} ({bd_str})")
 
     kwargs = {
         "lastname": lastname,
         "firstname": firstname,
         "middlename": middlename,
+        "office": office,
     }
     if birth_date:
         kwargs["day"] = birth_date.day
@@ -77,6 +83,7 @@ async def probit_person(
     manager_id: int | None = None,
     context: str = "other",
     military_id: int | None = None,
+    office: str | None = None,
 ) -> ProbivResult:
     """
     Сделать пробив человека через все доступные провайдеры (параллельно).
@@ -89,12 +96,15 @@ async def probit_person(
         context: 'auto' / 'next' / 'tool' / 'other' — откуда вызван пробив.
                  Влияет только на учёт в probiv_log, не на саму логику.
         military_id: ID военного, если пробив привязан к нему (для 'auto').
+        office: 'pvl' / 'dp' — какой счёт Sauron списать.
+                Если None, _probit_sauron бросит SauronError ("офис не указан").
+                Это защита от случайных пробивов без явного офиса.
     """
     result = ProbivResult()
 
     # Список провайдеров. Сейчас один, но архитектура готова к расширению.
     providers = [
-        _probit_sauron(full_name, birth_date),
+        _probit_sauron(full_name, birth_date, office=office),
         # _probit_other_service(full_name, birth_date),
     ]
 
@@ -121,6 +131,7 @@ async def probit_person(
                 military_id=military_id,
                 success=False,
                 error=err_msg,
+                office=office,
             )
             continue
 
@@ -137,6 +148,7 @@ async def probit_person(
             cost=item.get("cost", 0),
             military_id=military_id,
             success=True,
+            office=office,
         )
 
     if not result.raw_results:

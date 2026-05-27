@@ -856,6 +856,7 @@ async def insert_probiv_log(
     military_id: int | None = None,
     success: bool = True,
     error: str | None = None,
+    office: str | None = None,
 ) -> None:
     """
     Записать факт запроса к провайдеру пробива.
@@ -884,9 +885,9 @@ async def insert_probiv_log(
                 INSERT INTO probiv_log (
                     manager_id, provider, full_name, birth_date,
                     cost, currency, context, military_id,
-                    success, error
+                    success, error, office
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 """,
                 manager_id,
                 provider,
@@ -898,6 +899,7 @@ async def insert_probiv_log(
                 military_id,
                 success,
                 (error or "")[:255] if error else None,
+                office,
             )
     except Exception:
         # Сознательно подавляем любые ошибки логирования —
