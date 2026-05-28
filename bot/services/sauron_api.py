@@ -193,24 +193,31 @@ def split_full_name(full_name: str) -> tuple[str, str, Optional[str]]:
     Из 'Иванов Иван Иванович' → ('Иванов', 'Иван', 'Иванович')
     Из 'Иванов Иван' → ('Иванов', 'Иван', None)
 
-    Дополнительно: убирает тюркские постфиксы 'Оглы/Кызы/Оглу' и
-    проблемные символы (скобки, цифры, точки) — иначе Sauron API возвращает 400.
+    Дополнительно:
+    - Отбрасывает leading/trailing мусор: цифры, точки, двоеточия в начале/конце
+      (например '0 БОБЫЛЕВ ВАДИМ' → 'БОБЫЛЕВ ВАДИМ', ': Марков Павел' → 'Марков Павел')
+    - Убирает тюркские постфиксы 'Оглы/Кызы/Оглу'
+    - Убирает проблемные символы (скобки, цифры, точки) — иначе Sauron API возвращает 400
     """
     parts = full_name.strip().split()
     if len(parts) < 2:
         raise ValueError(f"ФИО должно содержать минимум фамилию и имя: '{full_name}'")
 
-    # Отфильтровываем тюркские постфиксы из любых позиций
-    filtered = [p for p in parts if p.lower() not in TURKIC_FILIAL_SUFFIXES]
-    if len(filtered) < 2:
-        # После очистки осталось меньше двух слов — берём что есть
-        filtered = parts
+    # Шаг 1: чистим каждую часть и отбрасываем те, что после чистки стали пустыми.
+    # Это убирает leading-мусор типа '0', ':', '.', '#1' и т.п.,
+    # а также любые "слова" из одной пунктуации в середине.
+    cleaned_parts = []
+    for p in parts:
+        if p.lower() in TURKIC_FILIAL_SUFFIXES:
+            continue
+        c = _clean_name_part(p)
+        if c:
+            cleaned_parts.append(c)
 
-    lastname = _clean_name_part(filtered[0])
-    firstname = _clean_name_part(filtered[1])
-    middlename = _clean_name_part(filtered[2]) if len(filtered) >= 3 else None
-
-    if not lastname or not firstname:
+    if len(cleaned_parts) < 2:
         raise ValueError(f"После очистки не осталось валидных частей ФИО: '{full_name}'")
 
+    lastname = cleaned_parts[0]
+    firstname = cleaned_parts[1]
+    middlename = cleaned_parts[2] if len(cleaned_parts) >= 3 else None
     return lastname, firstname, middlename

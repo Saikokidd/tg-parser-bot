@@ -401,25 +401,28 @@ async def attach_do(callback: CallbackQuery, state: FSMContext, manager: dict):
         dup = duplicates[0]
         dup_birth = dup.get("birth_date")
         dup_birth_str = dup_birth.strftime("%d.%m.%Y") if dup_birth else "—"
-
+        # Экранирование пользовательских строк для HTML.
+        # В ФИО/адресе из БД могут быть символы '<', '>', '&' — без экранирования
+        # Telegram упадёт с "can't parse entities".
+        import html as _html
+        dup_name = _html.escape(dup.get("full_name", "—") or "—")
         lines = [
-            "⚠️ *В базе уже есть похожий родственник:*",
+            "⚠️ <b>В базе уже есть похожий родственник:</b>",
             "",
-            f"• *{dup.get('full_name', '—')}* ({dup_birth_str})",
+            f"• <b>{dup_name}</b> ({dup_birth_str})",
         ]
         if dup.get("phone"):
-            lines.append(f"  📞 {dup['phone']}")
+            lines.append(f"  📞 {_html.escape(dup['phone'])}")
         if dup.get("address"):
             addr = dup["address"]
             if len(addr) > 70:
                 addr = addr[:67] + "..."
-            lines.append(f"  🏠 {addr}")
+            lines.append(f"  🏠 {_html.escape(addr)}")
         lines.append("")
         lines.append("Что делаем?")
-
         await callback.message.answer(
             "\n".join(lines),
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=attach_duplicate_kb(int(idx_str)),
         )
         return
