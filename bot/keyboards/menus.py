@@ -48,6 +48,7 @@ def managers_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить менеджера", callback_data="mgr:add")],
         [InlineKeyboardButton(text="🔄 Изменить ID менеджера", callback_data="mgr:edit_id")],
+        [InlineKeyboardButton(text="🏢 Сменить офис менеджера", callback_data="mgr:change_office")],
         [InlineKeyboardButton(text="📋 Список менеджеров", callback_data="mgr:list")],
         [InlineKeyboardButton(text="❌ Удалить менеджера", callback_data="mgr:delete")],
         [InlineKeyboardButton(text="« Назад", callback_data="admin:back")],
@@ -67,17 +68,48 @@ def cancel_kb() -> InlineKeyboardMarkup:
 
 
 def managers_list_kb(managers: list, action: str) -> InlineKeyboardMarkup:
-    """Список менеджеров кнопками. action: 'edit_id' | 'delete'"""
+    """Список менеджеров кнопками. action: 'edit_id' | 'delete' | 'change_office'"""
     rows = []
     for m in managers:
+        office = m.get("office") or "—"
         rows.append([
             InlineKeyboardButton(
-                text=f"👤 {m['name']}",
+                text=f"[{office}] 👤 {m['name']}",
                 callback_data=f"mgr_select:{action}:{m['id']}"
             )
         ])
     rows.append([InlineKeyboardButton(text="« Назад", callback_data="admin:managers")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def office_choice_kb(context: str, manager_id: int | None = None) -> InlineKeyboardMarkup:
+    """
+    Выбор офиса (pvl / dp).
+
+    context:
+        'add'    — при добавлении нового менеджера. manager_id=None.
+                   callback_data: 'office:add:pvl' / 'office:add:dp'
+        'change' — при смене офиса существующего. manager_id обязателен.
+                   callback_data: 'office:change:{id}:pvl' / 'office:change:{id}:dp'
+    """
+    if context == "add":
+        cb_pvl = "office:add:pvl"
+        cb_dp = "office:add:dp"
+    elif context == "change":
+        if manager_id is None:
+            raise ValueError("manager_id обязателен для context='change'")
+        cb_pvl = f"office:change:{manager_id}:pvl"
+        cb_dp = f"office:change:{manager_id}:dp"
+    else:
+        raise ValueError(f"Неизвестный context: {context!r}")
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🏢 pvl", callback_data=cb_pvl),
+            InlineKeyboardButton(text="🏢 dp", callback_data=cb_dp),
+        ],
+        [InlineKeyboardButton(text="« Отмена", callback_data="admin:managers")],
+    ])
 
 
 def confirm_delete_kb(manager_id: int) -> InlineKeyboardMarkup:

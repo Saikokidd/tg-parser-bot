@@ -6,11 +6,12 @@ from bot.utils.menu_guard import is_menu_button_pressed
 
 from bot.db.queries import (
     list_managers, create_manager, get_manager_by_id,
-    add_telegram_id_to_manager, deactivate_manager
+    add_telegram_id_to_manager, deactivate_manager,
+    update_manager_office,
 )
 from bot.keyboards.menus import (
     admin_menu, managers_menu, back_to_managers, cancel_kb,
-    managers_list_kb, confirm_delete_kb
+    managers_list_kb, confirm_delete_kb, office_choice_kb,
 )
 
 router = Router()
@@ -20,6 +21,7 @@ router = Router()
 
 class AddManagerStates(StatesGroup):
     waiting_name = State()
+    waiting_office = State()          # выбор офиса (pvl/dp) inline-кнопками
     waiting_telegram_id = State()
 
 
@@ -117,14 +119,35 @@ async def add_manager_name(message: Message, state: FSMContext):
     if len(name) < 2:
         await message.answer("⚠️ Имя слишком короткое. Попробуйте ещё раз:")
         return
-
     await state.update_data(name=name)
-    await state.set_state(AddManagerStates.waiting_telegram_id)
+    # Перед вводом Telegram ID — спрашиваем офис.
+    # Без него менеджер не сможет пробивать (не знаем какой Sauron-токен использовать).
+    await state.set_state(AddManagerStates.waiting_office)
     await message.answer(
-        f"Имя: *{name}*\n\nТеперь введите *Telegram ID* сотрудника (число):",
+        f"Имя: *{name}*\n\nВыберите *офис* сотрудника:",
+        parse_mode="Markdown",
+        reply_markup=office_choice_kb("add")
+    )
+
+
+@router.callback_query(AddManagerStates.waiting_office, F.data.startswith("office:add:"))
+async def add_manager_office(callback: CallbackQuery, state: FSMContext, is_admin: bool):
+    if not is_admin:
+        return
+    office = callback.data.split(":")[2]  # 'pvl' или 'dp'
+    if office not in ("pvl", "dp"):
+        await callback.answer("Неизвестный офис", show_alert=True)
+        return
+    await state.update_data(office=office)
+    data = await state.get_data()
+    await state.set_state(AddManagerStates.waiting_telegram_id)
+    await callback.message.edit_text(
+        f"Имя: *{data['name']}*\nОфис: *{office}*\n\n"
+        f"Теперь введите *Telegram ID* сотрудника (число):",
         parse_mode="Markdown",
         reply_markup=cancel_kb()
     )
+    await callback.answer()
 
 
 @router.message(AddManagerStates.waiting_telegram_id)
@@ -135,16 +158,16 @@ async def add_manager_telegram_id(message: Message, state: FSMContext):
     if not tid_text.isdigit():
         await message.answer("⚠️ Telegram ID должен быть числом. Попробуйте ещё раз:")
         return
-
     telegram_id = int(tid_text)
     data = await state.get_data()
     name = data['name']
-
+    office = data.get('office')  # сохранён на шаге waiting_office
     try:
-        manager = await create_manager(name=name, telegram_id=telegram_id)
+        manager = await create_manager(name=name, telegram_id=telegram_id, office=office)
         await message.answer(
             f"✅ Менеджер добавлен!\n\n"
             f"👤 Имя: *{manager['name']}*\n"
+            f"🏢 Офис: *{office or '—'}*\n"
             f"🆔 Telegram ID: `{telegram_id}`",
             parse_mode="Markdown",
             reply_markup=back_to_managers()
@@ -294,3 +317,79 @@ async def delete_manager_do(callback: CallbackQuery, is_admin: bool):
         parse_mode="Markdown",
         reply_markup=back_to_managers()
     )
+    
+    
+# ============== СМЕНА ОФИСА МЕНЕДЖЕРА ==============
+
+@router.callback_query(F.data == "mgr:change_office")
+async def change_office_start(callback: CallbackQuery, is_admin: bool):
+    """Шаг 1: показать список менеджеров для выбора."""
+    if not is_admin:
+        return
+    managers = await list_managers(only_active=True)
+    if not managers:
+        await callback.message.edit_text(
+            "📭 Активных менеджеров нет.",
+            reply_markup=back_to_managers()
+        )
+        return
+    await callback.message.edit_text(
+        "🏢 *Смена офиса менеджера*\n\n"
+        "Выберите менеджера. В скобках текущий офис.",
+        parse_mode="Markdown",
+        reply_markup=managers_list_kb(managers, action="change_office")
+    )
+
+
+@router.callback_query(F.data.startswith("mgr_select:change_office:"))
+async def change_office_pick_office(callback: CallbackQuery, is_admin: bool):
+    """Шаг 2: выбран менеджер — показываем выбор офиса."""
+    if not is_admin:
+        return
+    manager_id = int(callback.data.split(":")[2])
+    manager = await get_manager_by_id(manager_id)
+    if not manager:
+        await callback.message.edit_text("⚠️ Менеджер не найден.", reply_markup=back_to_managers())
+        return
+    current_office = manager.get("office") or "—"
+    await callback.message.edit_text(
+        f"👤 Менеджер: *{manager['name']}*\n"
+        f"🏢 Текущий офис: *{current_office}*\n\n"
+        f"Выберите новый офис:",
+        parse_mode="Markdown",
+        reply_markup=office_choice_kb("change", manager_id=manager_id)
+    )
+
+
+@router.callback_query(F.data.startswith("office:change:"))
+async def change_office_do(callback: CallbackQuery, is_admin: bool):
+    """
+    Шаг 3: выбран новый офис — применяем.
+    callback_data формат: 'office:change:{manager_id}:{office}'
+    """
+    if not is_admin:
+        return
+    parts = callback.data.split(":")
+    # ['office', 'change', '{id}', '{office}']
+    if len(parts) != 4:
+        await callback.answer("Неверный формат данных", show_alert=True)
+        return
+    manager_id = int(parts[2])
+    new_office = parts[3]
+    if new_office not in ("pvl", "dp"):
+        await callback.answer("Неизвестный офис", show_alert=True)
+        return
+    manager = await get_manager_by_id(manager_id)
+    if not manager:
+        await callback.message.edit_text("⚠️ Менеджер не найден.", reply_markup=back_to_managers())
+        return
+    old_office = manager.get("office") or "—"
+    await update_manager_office(manager_id, new_office)
+    await callback.message.edit_text(
+        f"✅ Офис обновлён.\n\n"
+        f"👤 Менеджер: *{manager['name']}*\n"
+        f"🏢 Было: *{old_office}* → Стало: *{new_office}*",
+        parse_mode="Markdown",
+        reply_markup=back_to_managers()
+    )
+    await callback.answer()

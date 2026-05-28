@@ -28,14 +28,17 @@ async def get_manager_by_telegram_id(telegram_id: int) -> Optional[dict]:
         return dict(row) if row else None
 
 
-async def create_manager(name: str, telegram_id: int, username: str = "") -> dict:
-    """Создать нового менеджера с первой привязкой telegram_id"""
+async def create_manager(name: str, telegram_id: int, username: str = "", office: str = None) -> dict:
+    """
+    Создать нового менеджера с первой привязкой telegram_id.
+    office: 'pvl' / 'dp' / None (None — пока не назначен, не сможет пробивать).
+    """
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
             manager = await conn.fetchrow(
-                "INSERT INTO managers (name) VALUES ($1) RETURNING *",
-                name
+                "INSERT INTO managers (name, office) VALUES ($1, $2) RETURNING *",
+                name, office
             )
             await conn.execute(
                 """
@@ -99,6 +102,21 @@ async def deactivate_manager(manager_id: int) -> None:
         await conn.execute(
             "UPDATE managers SET is_active = FALSE WHERE id = $1",
             manager_id
+        )
+
+
+async def update_manager_office(manager_id: int, office: str) -> None:
+    """
+    Поменять офис менеджера ('pvl' / 'dp').
+    Все последующие пробивы этого менеджера пойдут через токен нового офиса.
+    """
+    if office not in ('pvl', 'dp'):
+        raise ValueError(f"Неизвестный офис: {office!r}. Допустимо: 'pvl', 'dp'.")
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE managers SET office = $2 WHERE id = $1",
+            manager_id, office
         )
 
 
