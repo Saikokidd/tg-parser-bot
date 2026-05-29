@@ -517,14 +517,22 @@ def export_count_kb(available: int) -> InlineKeyboardMarkup:
 #                  РАСХОД НА ПРОБИВ (АДМИН)
 # ════════════════════════════════════════════════════════════
 
-def cost_menu_kb() -> InlineKeyboardMarkup:
-    """Главное меню раздела 'Расход на пробив'"""
-    return InlineKeyboardMarkup(inline_keyboard=[
+def cost_menu_kb(show_noattach: bool = True) -> InlineKeyboardMarkup:
+    """
+    Главное меню раздела 'Расход на пробив'.
+
+    show_noattach: показывать кнопку '🤖 Без привязки' (расход cron/enricher
+                   без менеджера). True — для super_admin, False — для office_admin
+                   (служебный расход к офису не относится).
+    """
+    rows = [
         [InlineKeyboardButton(text="📊 Общий", callback_data="cost:total")],
         [InlineKeyboardButton(text="👤 По менеджерам", callback_data="cost:by_mgr")],
-        [InlineKeyboardButton(text="🤖 Без привязки", callback_data="cost:noattach")],
-        [InlineKeyboardButton(text="« Назад", callback_data="admin:back")],
-    ])
+    ]
+    if show_noattach:
+        rows.append([InlineKeyboardButton(text="🤖 Без привязки", callback_data="cost:noattach")])
+    rows.append([InlineKeyboardButton(text="« Назад", callback_data="admin:back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def cost_period_kb(section: str, period: str = "week",
@@ -570,10 +578,11 @@ def cost_period_kb(section: str, period: str = "week",
         return f"cost:{section}:{p}"
 
     rows.append([
+        InlineKeyboardButton(text=label("Сегодня", "today"), callback_data=cb("today")),
         InlineKeyboardButton(text=label("Неделя", "week"), callback_data=cb("week")),
-        InlineKeyboardButton(text=label("Месяц", "month"), callback_data=cb("month")),
     ])
     rows.append([
+        InlineKeyboardButton(text=label("Месяц", "month"), callback_data=cb("month")),
         InlineKeyboardButton(text=label("Всё время", "all"), callback_data=cb("all")),
     ])
     rows.append([

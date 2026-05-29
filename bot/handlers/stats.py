@@ -24,6 +24,12 @@ PERIOD_LABELS = {
     "all": "За всё время",
 }
 
+def _office_filter_for(role: str | None, office: str | None) -> str | None:
+    """super_admin → None (все офисы), остальные admin/supervisor → свой офис."""
+    if role == "super_admin":
+        return None
+    return office
+
 
 def _period_since(period: str):
     """Вернуть datetime начала периода или None для 'all'"""
@@ -80,7 +86,8 @@ def _format_admin_stats(rows: list, period: str, page: int) -> tuple[str, int]:
 
 @router.message(F.text == "📊 Статистика")
 async def btn_stats(message: Message, manager: dict | None,
-                    is_admin: bool, is_supervisor: bool):
+                    is_admin: bool, is_supervisor: bool,
+                    role: str = None, office: str = None):
     if not manager and not is_admin and not is_supervisor:
         await message.answer("Доступа нет.")
         return
@@ -94,14 +101,16 @@ async def btn_stats(message: Message, manager: dict | None,
 
 @router.callback_query(F.data.startswith("stats:page:"))
 async def show_stats_page(callback: CallbackQuery, manager: dict | None,
-                           is_admin: bool, is_supervisor: bool):
+                           is_admin: bool, is_supervisor: bool,
+                           role: str = None, office: str = None):
     """Переключение страницы пагинации"""
     parts = callback.data.split(":")
     # формат: stats:page:<period>:<page>
     period = parts[2]
     page = int(parts[3])
     await callback.answer()
-    await _render_admin_stats(callback, period, page, is_admin, is_supervisor)
+    await _render_admin_stats(callback, period, page, is_admin, is_supervisor,
+                              role=role, office=office)
 
 
 @router.callback_query(F.data == "stats:noop")
@@ -112,13 +121,15 @@ async def stats_noop(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("stats:"))
 async def show_stats(callback: CallbackQuery, manager: dict | None,
-                     is_admin: bool, is_supervisor: bool):
+                     is_admin: bool, is_supervisor: bool,
+                     role: str = None, office: str = None):
     """Выбор периода"""
     period = callback.data.split(":")[1]
     await callback.answer()
 
     if is_admin or is_supervisor:
-        await _render_admin_stats(callback, period, 0, is_admin, is_supervisor)
+        await _render_admin_stats(callback, period, 0, is_admin, is_supervisor,
+                                  role=role, office=office)
     else:
         # Своя статистика
         since = _period_since(period)
@@ -134,10 +145,12 @@ async def show_stats(callback: CallbackQuery, manager: dict | None,
 
 
 async def _render_admin_stats(callback: CallbackQuery, period: str, page: int,
-                               is_admin: bool, is_supervisor: bool):
+                               is_admin: bool, is_supervisor: bool,
+                               role: str = None, office: str = None):
     """Отрисовка статистики для админа/пульта с пагинацией"""
     since = _period_since(period)
-    rows = await stats_for_all_managers(since=since)
+    office_filter = _office_filter_for(role, office)
+    rows = await stats_for_all_managers(since=since, office_filter=office_filter)
 
     text, total_pages = _format_admin_stats(rows, period, page)
     await callback.message.edit_text(

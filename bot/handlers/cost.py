@@ -30,15 +30,23 @@ router = Router()
 PAGE_SIZE = 10
 
 PERIOD_LABELS = {
+    "today": "За сегодня",
     "week": "За неделю",
     "month": "За месяц",
     "all": "За всё время",
 }
 
+def _office_filter_for(role: str | None, office: str | None) -> str | None:
+    """super_admin → None (все офисы), office_admin → свой офис."""
+    if role == "super_admin":
+        return None
+    return office
 
 def _period_since(period: str):
     """Datetime начала периода или None для 'all'."""
     now = datetime.now()
+    if period == "today":
+        return datetime.combine(now.date(), time.min)
     if period == "week":
         return datetime.combine((now - timedelta(days=7)).date(), time.min)
     if period == "month":
@@ -72,17 +80,19 @@ def _fmt_count(n: int, word: str = "запрос") -> str:
 # ════════════════════════════════════════════════════════════
 
 @router.callback_query(F.data == "admin:cost")
-async def open_cost_menu(callback: CallbackQuery, is_admin: bool, state: FSMContext):
+async def open_cost_menu(callback: CallbackQuery, is_admin: bool, state: FSMContext,
+                          role: str = None, office: str = None):
     """Меню раздела 'Расход на пробив'"""
     if not is_admin:
         await callback.answer("Доступ запрещён.", show_alert=True)
         return
 
     await callback.answer()
+    show_noattach = (role == "super_admin")
     await callback.message.edit_text(
         "💰 *Расход на пробив*\n\nВыберите раздел:",
         parse_mode="Markdown",
-        reply_markup=cost_menu_kb(),
+        reply_markup=cost_menu_kb(show_noattach=show_noattach),
     )
 
 
@@ -97,31 +107,35 @@ async def cost_noop(callback: CallbackQuery):
 # ════════════════════════════════════════════════════════════
 
 @router.callback_query(F.data == "cost:total")
-async def cost_total_default(callback: CallbackQuery, is_admin: bool, state: FSMContext):
+async def cost_total_default(callback: CallbackQuery, is_admin: bool, state: FSMContext,
+                              role: str = None, office: str = None):
     """Вход в раздел 'Общий' — берём запомненный период или week по умолчанию."""
     if not is_admin:
         return
     data = await state.get_data()
     period = data.get("cost_period", "week")
-    await _render_total(callback, period, state)
+    await _render_total(callback, period, state, role=role, office=office)
 
 
 @router.callback_query(F.data.startswith("cost:total:"))
-async def cost_total_period(callback: CallbackQuery, is_admin: bool, state: FSMContext):
+async def cost_total_period(callback: CallbackQuery, is_admin: bool, state: FSMContext,
+                             role: str = None, office: str = None):
     """Смена периода в разделе 'Общий'."""
     if not is_admin:
         return
     period = callback.data.split(":")[2]
-    await _render_total(callback, period, state)
+    await _render_total(callback, period, state, role=role, office=office)
 
 
-async def _render_total(callback: CallbackQuery, period: str, state: FSMContext):
+async def _render_total(callback: CallbackQuery, period: str, state: FSMContext,
+                         role: str = None, office: str = None):
     """Отрисовка раздела 'Общий'."""
     await callback.answer()
     await state.update_data(cost_period=period)  # запоминаем
 
     since = _period_since(period)
-    stats = await cost_stats_total(since=since)
+    office_filter = _office_filter_for(role, office)
+    stats = await cost_stats_total(since=since, office_filter=office_filter)
 
     period_label = PERIOD_LABELS.get(period, period)
 
@@ -151,17 +165,19 @@ async def _render_total(callback: CallbackQuery, period: str, state: FSMContext)
 # ════════════════════════════════════════════════════════════
 
 @router.callback_query(F.data == "cost:by_mgr")
-async def cost_by_mgr_default(callback: CallbackQuery, is_admin: bool, state: FSMContext):
+async def cost_by_mgr_default(callback: CallbackQuery, is_admin: bool, state: FSMContext,
+                               role: str = None, office: str = None):
     """Вход в раздел 'По менеджерам' — запомненный период, страница 0."""
     if not is_admin:
         return
     data = await state.get_data()
     period = data.get("cost_period", "week")
-    await _render_by_mgr(callback, period, page=0, state=state)
+    await _render_by_mgr(callback, period, page=0, state=state, role=role, office=office)
 
 
 @router.callback_query(F.data.startswith("cost:by_mgr:"))
-async def cost_by_mgr_route(callback: CallbackQuery, is_admin: bool, state: FSMContext):
+async def cost_by_mgr_route(callback: CallbackQuery, is_admin: bool, state: FSMContext,
+                             role: str = None, office: str = None):
     """
     Универсальный роутер для 'По менеджерам':
     - cost:by_mgr:{period}:{page}
@@ -172,16 +188,18 @@ async def cost_by_mgr_route(callback: CallbackQuery, is_admin: bool, state: FSMC
     # parts = ['cost', 'by_mgr', period, page]
     period = parts[2]
     page = int(parts[3]) if len(parts) > 3 else 0
-    await _render_by_mgr(callback, period, page=page, state=state)
+    await _render_by_mgr(callback, period, page=page, state=state, role=role, office=office)
 
 
-async def _render_by_mgr(callback: CallbackQuery, period: str, page: int, state: FSMContext):
+async def _render_by_mgr(callback: CallbackQuery, period: str, page: int, state: FSMContext,
+                          role: str = None, office: str = None):
     """Отрисовка раздела 'По менеджерам' с пагинацией."""
     await callback.answer()
     await state.update_data(cost_period=period)
 
     since = _period_since(period)
-    rows = await cost_stats_by_manager(since=since)
+    office_filter = _office_filter_for(role, office)
+    rows = await cost_stats_by_manager(since=since, office_filter=office_filter)
 
     period_label = PERIOD_LABELS.get(period, period)
 
@@ -240,9 +258,11 @@ async def _render_by_mgr(callback: CallbackQuery, period: str, page: int, state:
 # ════════════════════════════════════════════════════════════
 
 @router.callback_query(F.data == "cost:noattach")
-async def cost_noattach_default(callback: CallbackQuery, is_admin: bool, state: FSMContext):
-    """Вход в раздел 'Без привязки'."""
-    if not is_admin:
+async def cost_noattach_default(callback: CallbackQuery, is_admin: bool, state: FSMContext,
+                                 role: str = None, office: str = None):
+    """Вход в раздел 'Без привязки'. Только super_admin."""
+    if role != "super_admin":
+        await callback.answer("Только для super-admin.", show_alert=True)
         return
     data = await state.get_data()
     period = data.get("cost_period", "week")
@@ -250,9 +270,11 @@ async def cost_noattach_default(callback: CallbackQuery, is_admin: bool, state: 
 
 
 @router.callback_query(F.data.startswith("cost:noattach:"))
-async def cost_noattach_period(callback: CallbackQuery, is_admin: bool, state: FSMContext):
-    """Смена периода в разделе 'Без привязки'."""
-    if not is_admin:
+async def cost_noattach_period(callback: CallbackQuery, is_admin: bool, state: FSMContext,
+                                role: str = None, office: str = None):
+    """Смена периода в разделе 'Без привязки'. Только super_admin."""
+    if role != "super_admin":
+        await callback.answer("Только для super-admin.", show_alert=True)
         return
     period = callback.data.split(":")[2]
     await _render_noattach(callback, period, state)

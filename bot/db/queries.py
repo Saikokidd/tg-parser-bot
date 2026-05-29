@@ -405,17 +405,29 @@ async def stats_for_manager(manager_id: int, since=None) -> dict:
         }
 
 
-async def stats_for_all_managers(since=None) -> list:
+async def stats_for_all_managers(since=None, office_filter: str | None = None) -> list:
     """
     Статистика по всем активным менеджерам.
     Возвращает список: [{manager_id, name, loaded, filled}, ...]
     Сортировка: по убыванию loaded.
+
+    office_filter: если задан ('pvl'/'dp'/'ha') — только менеджеры этого офиса.
+                   None — все офисы (для super_admin).
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
+        # Собираем WHERE и параметры динамически
+        params: list = []
+        office_cond = ""
+        if office_filter is not None:
+            params.append(office_filter)
+            office_cond = f" AND m.office = ${len(params)}"
+
         if since:
+            params.append(since)
+            since_param = f"${len(params)}"
             rows = await conn.fetch(
-                """
+                f"""
                 SELECT
                     m.id AS manager_id,
                     m.name,
@@ -428,16 +440,16 @@ async def stats_for_all_managers(since=None) -> list:
                     ) AS filled
                 FROM managers m
                 LEFT JOIN persons_military pm
-                    ON pm.added_by = m.id AND pm.created_at >= $1
-                WHERE m.is_active = TRUE
+                    ON pm.added_by = m.id AND pm.created_at >= {since_param}
+                WHERE m.is_active = TRUE{office_cond}
                 GROUP BY m.id, m.name
                 ORDER BY loaded DESC, m.name
                 """,
-                since
+                *params
             )
         else:
             rows = await conn.fetch(
-                """
+                f"""
                 SELECT
                     m.id AS manager_id,
                     m.name,
@@ -450,10 +462,11 @@ async def stats_for_all_managers(since=None) -> list:
                     ) AS filled
                 FROM managers m
                 LEFT JOIN persons_military pm ON pm.added_by = m.id
-                WHERE m.is_active = TRUE
+                WHERE m.is_active = TRUE{office_cond}
                 GROUP BY m.id, m.name
                 ORDER BY loaded DESC, m.name
-                """
+                """,
+                *params
             )
         return [dict(r) for r in rows]
     
@@ -944,68 +957,73 @@ async def insert_probiv_log(
 #                СТАТИСТИКА РАСХОДА НА ПРОБИВ
 # ════════════════════════════════════════════════════════════
 
-async def cost_stats_total(since=None) -> dict:
+async def cost_stats_total(since=None, office_filter: str | None = None) -> dict:
     """
     Сводный отчёт по ВСЕМ запросам к провайдерам пробива.
     Включает все contexts ('auto', 'next', 'tool', 'other')
     и привязанные/непривязанные к менеджеру записи.
 
-    Args:
-        since: datetime начала периода. None = всё время.
+    office_filter: если задан — считаем только запросы менеджеров этого офиса
+                   (через JOIN на managers по текущему офису менеджера).
+                   None — вся система (super_admin).
+
+    Примечание: фильтр идёт по m.office (текущий офис менеджера), а не
+    pl.office, т.к. исторические записи (до миграции 10) имеют pl.office=NULL.
+    При office_filter записи без менеджера (cron/enricher) не попадают в выборку.
 
     Returns:
         dict с полями:
-          total_count, total_cost,
-          auto_count, auto_cost,
-          next_count, next_cost,
-          tool_count, tool_cost,
+          total_count, total_cost, auto_count, auto_cost,
+          next_count, next_cost, tool_count, tool_cost,
           failed_count, failed_cost
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
-        if since:
-            row = await conn.fetchrow(
-                """
-                SELECT
-                    COUNT(*) AS total_count,
-                    COALESCE(SUM(cost), 0) AS total_cost,
-                    COUNT(*) FILTER (WHERE context = 'auto') AS auto_count,
-                    COALESCE(SUM(cost) FILTER (WHERE context = 'auto'), 0) AS auto_cost,
-                    COUNT(*) FILTER (WHERE context = 'next') AS next_count,
-                    COALESCE(SUM(cost) FILTER (WHERE context = 'next'), 0) AS next_cost,
-                    COUNT(*) FILTER (WHERE context = 'tool') AS tool_count,
-                    COALESCE(SUM(cost) FILTER (WHERE context = 'tool'), 0) AS tool_cost,
-                    COUNT(*) FILTER (WHERE success = FALSE) AS failed_count,
-                    COALESCE(SUM(cost) FILTER (WHERE success = FALSE), 0) AS failed_cost
-                FROM probiv_log
-                WHERE created_at >= $1
-                """,
-                since,
-            )
+        params: list = []
+        conditions: list = []
+
+        # Если фильтруем по офису — нужен JOIN на managers
+        if office_filter is not None:
+            join_clause = "JOIN managers m ON m.id = pl.manager_id"
+            params.append(office_filter)
+            conditions.append(f"m.office = ${len(params)}")
         else:
-            row = await conn.fetchrow(
-                """
-                SELECT
-                    COUNT(*) AS total_count,
-                    COALESCE(SUM(cost), 0) AS total_cost,
-                    COUNT(*) FILTER (WHERE context = 'auto') AS auto_count,
-                    COALESCE(SUM(cost) FILTER (WHERE context = 'auto'), 0) AS auto_cost,
-                    COUNT(*) FILTER (WHERE context = 'next') AS next_count,
-                    COALESCE(SUM(cost) FILTER (WHERE context = 'next'), 0) AS next_cost,
-                    COUNT(*) FILTER (WHERE context = 'tool') AS tool_count,
-                    COALESCE(SUM(cost) FILTER (WHERE context = 'tool'), 0) AS tool_cost,
-                    COUNT(*) FILTER (WHERE success = FALSE) AS failed_count,
-                    COALESCE(SUM(cost) FILTER (WHERE success = FALSE), 0) AS failed_cost
-                FROM probiv_log
-                """
-            )
+            join_clause = ""
+
+        if since:
+            params.append(since)
+            conditions.append(f"pl.created_at >= ${len(params)}")
+
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+        row = await conn.fetchrow(
+            f"""
+            SELECT
+                COUNT(*) AS total_count,
+                COALESCE(SUM(pl.cost), 0) AS total_cost,
+                COUNT(*) FILTER (WHERE pl.context = 'auto') AS auto_count,
+                COALESCE(SUM(pl.cost) FILTER (WHERE pl.context = 'auto'), 0) AS auto_cost,
+                COUNT(*) FILTER (WHERE pl.context = 'next') AS next_count,
+                COALESCE(SUM(pl.cost) FILTER (WHERE pl.context = 'next'), 0) AS next_cost,
+                COUNT(*) FILTER (WHERE pl.context = 'tool') AS tool_count,
+                COALESCE(SUM(pl.cost) FILTER (WHERE pl.context = 'tool'), 0) AS tool_cost,
+                COUNT(*) FILTER (WHERE pl.success = FALSE) AS failed_count,
+                COALESCE(SUM(pl.cost) FILTER (WHERE pl.success = FALSE), 0) AS failed_cost
+            FROM probiv_log pl
+            {join_clause}
+            {where}
+            """,
+            *params
+        )
         return dict(row)
 
 
-async def cost_stats_by_manager(since=None) -> list[dict]:
+async def cost_stats_by_manager(since=None, office_filter: str | None = None) -> list[dict]:
     """
     Расходы по менеджерам, отсортированные по убыванию суммы.
     Включает только записи с manager_id IS NOT NULL.
+
+    office_filter: если задан — только менеджеры этого офиса (по m.office).
 
     Возвращает список:
       [{manager_id, name, is_active, total_count, total_cost,
@@ -1013,48 +1031,40 @@ async def cost_stats_by_manager(since=None) -> list[dict]:
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
+        params: list = []
+        conditions: list = []
+
+        if office_filter is not None:
+            params.append(office_filter)
+            conditions.append(f"m.office = ${len(params)}")
+
         if since:
-            rows = await conn.fetch(
-                """
-                SELECT
-                    m.id AS manager_id,
-                    m.name,
-                    m.is_active,
-                    COUNT(pl.id) AS total_count,
-                    COALESCE(SUM(pl.cost), 0) AS total_cost,
-                    COUNT(pl.id) FILTER (WHERE pl.context = 'auto') AS auto_count,
-                    COALESCE(SUM(pl.cost) FILTER (WHERE pl.context = 'auto'), 0) AS auto_cost,
-                    COUNT(pl.id) FILTER (WHERE pl.context = 'next') AS next_count,
-                    COALESCE(SUM(pl.cost) FILTER (WHERE pl.context = 'next'), 0) AS next_cost
-                FROM probiv_log pl
-                JOIN managers m ON m.id = pl.manager_id
-                WHERE pl.created_at >= $1
-                GROUP BY m.id, m.name, m.is_active
-                HAVING COUNT(pl.id) > 0
-                ORDER BY total_cost DESC, m.name
-                """,
-                since,
-            )
-        else:
-            rows = await conn.fetch(
-                """
-                SELECT
-                    m.id AS manager_id,
-                    m.name,
-                    m.is_active,
-                    COUNT(pl.id) AS total_count,
-                    COALESCE(SUM(pl.cost), 0) AS total_cost,
-                    COUNT(pl.id) FILTER (WHERE pl.context = 'auto') AS auto_count,
-                    COALESCE(SUM(pl.cost) FILTER (WHERE pl.context = 'auto'), 0) AS auto_cost,
-                    COUNT(pl.id) FILTER (WHERE pl.context = 'next') AS next_count,
-                    COALESCE(SUM(pl.cost) FILTER (WHERE pl.context = 'next'), 0) AS next_cost
-                FROM probiv_log pl
-                JOIN managers m ON m.id = pl.manager_id
-                GROUP BY m.id, m.name, m.is_active
-                HAVING COUNT(pl.id) > 0
-                ORDER BY total_cost DESC, m.name
-                """
-            )
+            params.append(since)
+            conditions.append(f"pl.created_at >= ${len(params)}")
+
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+        rows = await conn.fetch(
+            f"""
+            SELECT
+                m.id AS manager_id,
+                m.name,
+                m.is_active,
+                COUNT(pl.id) AS total_count,
+                COALESCE(SUM(pl.cost), 0) AS total_cost,
+                COUNT(pl.id) FILTER (WHERE pl.context = 'auto') AS auto_count,
+                COALESCE(SUM(pl.cost) FILTER (WHERE pl.context = 'auto'), 0) AS auto_cost,
+                COUNT(pl.id) FILTER (WHERE pl.context = 'next') AS next_count,
+                COALESCE(SUM(pl.cost) FILTER (WHERE pl.context = 'next'), 0) AS next_cost
+            FROM probiv_log pl
+            JOIN managers m ON m.id = pl.manager_id
+            {where}
+            GROUP BY m.id, m.name, m.is_active
+            HAVING COUNT(pl.id) > 0
+            ORDER BY total_cost DESC, m.name
+            """,
+            *params
+        )
         return [dict(r) for r in rows]
 
 
