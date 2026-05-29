@@ -8,6 +8,7 @@ API: voxlink.ru — бесплатный, лимит 10 запросов/сек,
 import os
 import re
 import logging
+import time
 import aiohttp
 import asyncio
 
@@ -16,12 +17,41 @@ logger = logging.getLogger(__name__)
 API_URL = "http://num.voxlink.ru/get/"
 TIMEOUT_SEC = 10
 
-# Прокси с российским IP — voxlink с 2026 принимает запросы только из РФ.
-# Указывается в .env как VOXLINK_PROXY_URL=http://user:pass@host:port
-# Если не задан — запросы идут напрямую (для локальной разработки/тестов).
+# Прокси с российским IP — устаревший путь.
+# С 29 мая 2026 ходим через WireGuard-туннель wg1 (см. /etc/wireguard/wg1.conf).
+# Маршрут до 79.137.209.117 уведён через RU-VPN, на уровне ядра.
+# Переменная VOXLINK_PROXY_URL оставлена опционально, если когда-то понадобится
+# вернуть HTTP-прокси.
 VOXLINK_PROXY_URL = os.getenv("VOXLINK_PROXY_URL", "").strip() or None
 if VOXLINK_PROXY_URL:
     logger.info("voxlink: запросы будут идти через прокси")
+else:
+    logger.info("voxlink: запросы напрямую (предполагается WG-маршрут)")
+
+
+# ──────────── Rate limiter ────────────
+# voxlink заявляет 10 RPS, на практике 8-9 уже даёт 429. Держим 8 с запасом.
+# Лимитер общий на весь процесс — действует для всех потребителей
+# (probiv_service, voxlink_enricher, tools/* при импорте этого модуля).
+#
+# Реализация: простой временной слот. Перед каждым запросом считаем
+# когда было прошлое обращение, и если прошло меньше MIN_INTERVAL —
+# спим оставшееся.
+VOXLINK_MAX_RPS = 8
+_MIN_INTERVAL = 1.0 / VOXLINK_MAX_RPS  # секунды между запросами
+_rate_lock = asyncio.Lock()
+_last_request_at = 0.0
+
+
+async def _rate_limit():
+    """Подождать до следующего разрешённого слота. Глобальный лок на процесс."""
+    global _last_request_at
+    async with _rate_lock:
+        now = time.monotonic()
+        wait = _last_request_at + _MIN_INTERVAL - now
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _last_request_at = time.monotonic()
 
 
 def _normalize_phone_for_api(phone: str) -> str | None:
@@ -94,6 +124,10 @@ async def lookup_phone(phone: str) -> dict | None:
     num = _normalize_phone_for_api(phone)
     if not num:
         return None
+
+    # Глобальный rate-limit 8 RPS — общий на весь процесс.
+    # Сюда приходят и фоновый enricher, и автопробив, и tools.
+    await _rate_limit()
 
     timeout = aiohttp.ClientTimeout(total=TIMEOUT_SEC)
     try:
