@@ -44,15 +44,27 @@ def admin_menu() -> InlineKeyboardMarkup:
     ])
 
 
-def managers_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
+def managers_menu(is_super_admin: bool = False) -> InlineKeyboardMarkup:
+    """
+    Меню управления менеджерами.
+
+    is_super_admin: если True — показывается дополнительная кнопка
+                   '🏢 Сменить офис менеджера' (перенос между офисами).
+                   У office_admin её нет — это серьёзное действие.
+    """
+    rows = [
         [InlineKeyboardButton(text="➕ Добавить менеджера", callback_data="mgr:add")],
         [InlineKeyboardButton(text="🔄 Изменить ID менеджера", callback_data="mgr:edit_id")],
-        [InlineKeyboardButton(text="🏢 Сменить офис менеджера", callback_data="mgr:change_office")],
+    ]
+    if is_super_admin:
+        rows.append([InlineKeyboardButton(text="🏢 Сменить офис менеджера",
+                                          callback_data="mgr:change_office")])
+    rows.extend([
         [InlineKeyboardButton(text="📋 Список менеджеров", callback_data="mgr:list")],
         [InlineKeyboardButton(text="❌ Удалить менеджера", callback_data="mgr:delete")],
         [InlineKeyboardButton(text="« Назад", callback_data="admin:back")],
     ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def back_to_managers() -> InlineKeyboardMarkup:
@@ -82,32 +94,35 @@ def managers_list_kb(managers: list, action: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def office_choice_kb(context: str, manager_id: int | None = None) -> InlineKeyboardMarkup:
+def office_choice_kb(context: str, manager_id: int | None = None,
+                     restrict_to_office: str | None = None) -> InlineKeyboardMarkup:
     """
-    Выбор офиса (pvl / dp).
+    Выбор офиса (pvl / dp / ha).
 
     context:
         'add'    — при добавлении нового менеджера. manager_id=None.
-                   callback_data: 'office:add:pvl' / 'office:add:dp'
+                   callback_data: 'office:add:pvl' / 'office:add:dp' / 'office:add:ha'
         'change' — при смене офиса существующего. manager_id обязателен.
-                   callback_data: 'office:change:{id}:pvl' / 'office:change:{id}:dp'
+                   callback_data: 'office:change:{id}:pvl' / 'office:change:{id}:dp' / 'office:change:{id}:ha'
+
+    restrict_to_office: если задан — рисуем кнопку только для этого офиса
+                       (используется для office_admin при добавлении: не давать выбор офиса).
     """
+    all_offices = ("pvl", "dp", "ha")
+    offices = (restrict_to_office,) if restrict_to_office else all_offices
+
     if context == "add":
-        cb_pvl = "office:add:pvl"
-        cb_dp = "office:add:dp"
+        def cb(o): return f"office:add:{o}"
     elif context == "change":
         if manager_id is None:
             raise ValueError("manager_id обязателен для context='change'")
-        cb_pvl = f"office:change:{manager_id}:pvl"
-        cb_dp = f"office:change:{manager_id}:dp"
+        def cb(o): return f"office:change:{manager_id}:{o}"
     else:
         raise ValueError(f"Неизвестный context: {context!r}")
 
+    row = [InlineKeyboardButton(text=f"🏢 {o}", callback_data=cb(o)) for o in offices]
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🏢 pvl", callback_data=cb_pvl),
-            InlineKeyboardButton(text="🏢 dp", callback_data=cb_dp),
-        ],
+        row,
         [InlineKeyboardButton(text="« Отмена", callback_data="admin:managers")],
     ])
 

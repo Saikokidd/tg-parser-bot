@@ -67,14 +67,27 @@ async def add_telegram_id_to_manager(manager_id: int, telegram_id: int, username
             return False
 
 
-async def list_managers(only_active: bool = True) -> list:
-    """Список менеджеров с их telegram_id"""
+async def list_managers(only_active: bool = True, office_filter: str | None = None) -> list:
+    """
+    Список менеджеров с их telegram_id и офисом.
+
+    office_filter: если задан ('pvl' / 'dp' / 'ha') — вернёт только менеджеров
+                   этого офиса. None — вернёт всех (для super_admin).
+    """
     pool = await get_pool()
     async with pool.acquire() as conn:
-        where = "WHERE m.is_active = TRUE" if only_active else ""
+        conditions = []
+        params: list = []
+        if only_active:
+            conditions.append("m.is_active = TRUE")
+        if office_filter is not None:
+            params.append(office_filter)
+            conditions.append(f"m.office = ${len(params)}")
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
         rows = await conn.fetch(
             f"""
-            SELECT m.id, m.name, m.is_active, m.created_at,
+            SELECT m.id, m.name, m.office, m.role, m.is_active, m.created_at,
                    COALESCE(
                        array_agg(mti.telegram_id) FILTER (WHERE mti.telegram_id IS NOT NULL),
                        '{{}}'::bigint[]
@@ -83,8 +96,9 @@ async def list_managers(only_active: bool = True) -> list:
             LEFT JOIN manager_telegram_ids mti ON mti.manager_id = m.id
             {where}
             GROUP BY m.id
-            ORDER BY m.name
-            """
+            ORDER BY m.office NULLS LAST, m.name
+            """,
+            *params
         )
         return [dict(r) for r in rows]
 
@@ -107,11 +121,11 @@ async def deactivate_manager(manager_id: int) -> None:
 
 async def update_manager_office(manager_id: int, office: str) -> None:
     """
-    Поменять офис менеджера ('pvl' / 'dp').
+    Поменять офис менеджера ('pvl' / 'dp' / 'ha').
     Все последующие пробивы этого менеджера пойдут через токен нового офиса.
     """
-    if office not in ('pvl', 'dp'):
-        raise ValueError(f"Неизвестный офис: {office!r}. Допустимо: 'pvl', 'dp'.")
+    if office not in ('pvl', 'dp', 'ha'):
+        raise ValueError(f"Неизвестный офис: {office!r}. Допустимо: 'pvl', 'dp', 'ha'.")
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
@@ -1350,3 +1364,49 @@ async def get_military_by_id_office_check(military_id: int, office_filter: str =
                 military_id, office_filter,
             )
         return dict(row) if row else None
+    
+    
+async def move_manager_with_data_to_office(manager_id: int, new_office: str) -> dict:
+    """
+    Полный перенос менеджера в другой офис: обновляет managers.office,
+    persons_military.office (по added_by) и relatives.office (по added_by).
+    Всё в одной транзакции — либо всё, либо ничего.
+
+    Возвращает словарь со счётчиками: {'military_moved': N, 'relatives_moved': N}.
+    """
+    if new_office not in ('pvl', 'dp', 'ha'):
+        raise ValueError(f"Неизвестный офис: {new_office!r}.")
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "UPDATE managers SET office = $1 WHERE id = $2",
+                new_office, manager_id
+            )
+            mil_count = await conn.fetchval(
+                """
+                WITH updated AS (
+                    UPDATE persons_military SET office = $1
+                    WHERE added_by = $2 AND (office IS DISTINCT FROM $1)
+                    RETURNING 1
+                )
+                SELECT COUNT(*) FROM updated
+                """,
+                new_office, manager_id
+            )
+            rel_count = await conn.fetchval(
+                """
+                WITH updated AS (
+                    UPDATE relatives SET office = $1
+                    WHERE added_by = $2 AND (office IS DISTINCT FROM $1)
+                    RETURNING 1
+                )
+                SELECT COUNT(*) FROM updated
+                """,
+                new_office, manager_id
+            )
+            return {
+                'military_moved': mil_count or 0,
+                'relatives_moved': rel_count or 0,
+            }
