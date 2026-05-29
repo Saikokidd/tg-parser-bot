@@ -22,6 +22,7 @@ from bot.parser.military_parser import status_label
 from bot.db.queries import (
     list_military_without_relatives, list_military_by_manager, get_military_by_id,
     find_relative_duplicates_with_links, insert_relative, link_military_relative,
+    find_relative_global_dup, insert_relative_v2,    # B1: глобальный дубль + office
 )
 from bot.keyboards.menus import (
     military_list_kb, confirm_relative_kb, add_more_relatives_kb,
@@ -241,6 +242,41 @@ async def _process_next_in_queue(target, state: FSMContext):
 
     status_msg = await target.answer(f"{progress}🔍 Проверка на дубликаты...")
 
+    # Глобальный дубль-чек (этап B1)
+    # Сначала проверяем — может дубль из ЧУЖОГО офиса. Тогда сразу отказ.
+    # Получаем office текущего менеджера из БД (надёжнее чем из FSM,
+    # т.к. в FSM он мог не положиться при некоторых сценариях).
+    from bot.db.queries import get_manager_by_id
+    mgr = await get_manager_by_id(manager_id)
+    my_office = (mgr or {}).get("office") if mgr else None
+
+    global_dup = await find_relative_global_dup(
+        full_name=parsed.get("full_name"),
+        birth_date=parsed.get("birth_date"),
+        phone=parsed.get("phone"),
+        address=parsed.get("address"),
+    )
+
+    if global_dup:
+        dup_office = global_dup.get("office")
+
+        # Дубль из чужого офиса — жёсткий отказ без вариантов
+        if dup_office and my_office and dup_office != my_office:
+            mgr_name = global_dup.get("manager_name") or "—"
+            await status_msg.edit_text(
+                f"{progress}⛔ Этот родственник уже в работе у офиса "
+                f"<b>{dup_office}</b> (менеджер: <b>{mgr_name}</b>).\n\n"
+                f"Работа с ним запрещена.",
+                parse_mode="HTML",
+            )
+            # Пропускаем этого, идём дальше по очереди
+            data2 = await state.get_data()
+            await state.update_data(batch_skipped=data2.get("batch_skipped", 0) + 1)
+            await _process_next_in_queue(target, state)
+            return
+
+    # Дубля из чужого офиса нет — смотрим дубли в БД (свой офис или общая база)
+    # Используем старую функцию с привязками — она нужна для UI выбора.
     duplicates = await find_relative_duplicates_with_links(
         full_name=parsed.get("full_name"),
         birth_date=parsed.get("birth_date"),
@@ -267,7 +303,6 @@ async def _process_next_in_queue(target, state: FSMContext):
                     addr = addr[:67] + "..."
                 lines.append(f"   🏠 {addr}")
 
-            # Кто первым внёс этого родственника в БД
             if d.get("manager_name"):
                 lines.append(f"   _Добавил:_ {d['manager_name']}")
 
@@ -383,7 +418,8 @@ async def _save_and_link(target: Message, state: FSMContext,
     """
     parsed = await _enrich_with_voxlink(parsed)
 
-    relative = await insert_relative(parsed, manager_id)
+    # v2: автоматически проставляет office из manager.office создателя
+    relative = await insert_relative_v2(parsed, manager_id)
     await link_military_relative(military_id, relative['id'], manager_id)
 
     if batch_mode:

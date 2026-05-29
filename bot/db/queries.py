@@ -1081,3 +1081,272 @@ async def cost_stats_no_attach(since=None) -> dict:
                 """
             )
         return dict(row)
+    
+    
+# ════════════════════════════════════════════════════════════
+#       МУЛЬТИ-ОФИСНОСТЬ — ЭТАП B
+#
+# Здесь живут функции которые знают про office.
+# Старые функции (find_military_duplicates, find_relative_duplicates*,
+# list_military_paginated, list_military_without_relatives) пока
+# оставлены для backward compat — будут удалены в этапе B3
+# после того как все хендлеры переведены на новые.
+# ════════════════════════════════════════════════════════════
+
+
+# ──────────── Глобальная дубль-детекция ────────────
+
+async def find_military_global_dup(full_name: str, birth_date=None) -> Optional[dict]:
+    """
+    Глобальный дубль-чек военного по всей БД (игнорирует office).
+
+    Логика:
+    - Если ДР указана — точное совпадение ФИО+ДР, ИЛИ ФИО без ДР (потенциальный дубль)
+    - Если ДР не указана — совпадение по ФИО среди записей без ДР
+
+    Возвращает dict с инфой о найденном дубле или None.
+    Поля результата: id, full_name, birth_date, office, manager_name, added_by.
+
+    Если дублей несколько — возвращает первый по приоритету:
+    1. Точное совпадение ФИО+ДР
+    2. Совпадение ФИО без ДР
+    """
+    if not full_name:
+        return None
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if birth_date is not None:
+            row = await conn.fetchrow(
+                """
+                SELECT pm.id, pm.full_name, pm.birth_date, pm.office,
+                       pm.added_by, m.name AS manager_name
+                FROM persons_military pm
+                LEFT JOIN managers m ON m.id = pm.added_by
+                WHERE LOWER(pm.full_name) = LOWER($1)
+                  AND (pm.birth_date = $2 OR pm.birth_date IS NULL)
+                ORDER BY
+                    CASE WHEN pm.birth_date = $2 THEN 0 ELSE 1 END,
+                    pm.created_at ASC
+                LIMIT 1
+                """,
+                full_name, birth_date
+            )
+        else:
+            row = await conn.fetchrow(
+                """
+                SELECT pm.id, pm.full_name, pm.birth_date, pm.office,
+                       pm.added_by, m.name AS manager_name
+                FROM persons_military pm
+                LEFT JOIN managers m ON m.id = pm.added_by
+                WHERE LOWER(pm.full_name) = LOWER($1)
+                ORDER BY
+                    CASE WHEN pm.birth_date IS NULL THEN 0 ELSE 1 END,
+                    pm.created_at ASC
+                LIMIT 1
+                """,
+                full_name
+            )
+        return dict(row) if row else None
+
+
+async def find_relative_global_dup(
+    full_name: str = None, birth_date=None,
+    phone: str = None, address: str = None,
+) -> Optional[dict]:
+    """
+    Глобальный дубль-чек родственника по всей БД (игнорирует office).
+    Дубль = совпадение 2 из 4 (ФИО, ДР, телефон, адрес).
+
+    Возвращает первый по релевантности (наибольшее число совпадений).
+    Поля: id, full_name, birth_date, phone, address, office, added_by, manager_name.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT r.id, r.full_name, r.birth_date, r.phone, r.address,
+                   r.office, r.added_by, m.name AS manager_name,
+                   (
+                       (CASE WHEN $1::text IS NOT NULL AND LOWER(r.full_name) = LOWER($1) THEN 1 ELSE 0 END) +
+                       (CASE WHEN $2::date IS NOT NULL AND r.birth_date = $2 THEN 1 ELSE 0 END) +
+                       (CASE WHEN $3::text IS NOT NULL AND r.phone = $3 THEN 1 ELSE 0 END) +
+                       (CASE WHEN $4::text IS NOT NULL AND LOWER(r.address) = LOWER($4) THEN 1 ELSE 0 END)
+                   ) AS match_count
+            FROM relatives r
+            LEFT JOIN managers m ON m.id = r.added_by
+            WHERE (
+                (CASE WHEN $1::text IS NOT NULL AND LOWER(r.full_name) = LOWER($1) THEN 1 ELSE 0 END) +
+                (CASE WHEN $2::date IS NOT NULL AND r.birth_date = $2 THEN 1 ELSE 0 END) +
+                (CASE WHEN $3::text IS NOT NULL AND r.phone = $3 THEN 1 ELSE 0 END) +
+                (CASE WHEN $4::text IS NOT NULL AND LOWER(r.address) = LOWER($4) THEN 1 ELSE 0 END)
+            ) >= 2
+            ORDER BY match_count DESC, r.created_at ASC
+            LIMIT 1
+            """,
+            full_name, birth_date, phone, address
+        )
+        return dict(row) if row else None
+
+
+# ──────────── Вставка с автоматическим office ────────────
+
+async def insert_military_v2(data: dict, manager_id: int) -> dict:
+    """
+    Вставка военного с автоматическим определением office.
+
+    Office берётся из manager.office создателя. Если у менеджера office IS NULL —
+    запись пройдёт с office=NULL (но такие менеджеры не должны вообще доходить
+    до пробива — у них нет Sauron-токена).
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # Получаем office создателя одним запросом-вставкой
+        row = await conn.fetchrow(
+            """
+            INSERT INTO persons_military
+                (full_name, birth_date, status, extra, added_by, office)
+            VALUES (
+                $1, $2, $3, $4, $5,
+                (SELECT office FROM managers WHERE id = $5)
+            )
+            RETURNING *
+            """,
+            data.get("full_name"),
+            data.get("birth_date"),
+            data.get("status"),
+            data.get("extra", {}),
+            manager_id,
+        )
+        return dict(row)
+
+
+async def insert_relative_v2(data: dict, manager_id: int) -> dict:
+    """Вставка родственника с автоматическим office из manager.office создателя."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO relatives
+                (full_name, birth_date, phone, address, extra, added_by, office)
+            VALUES (
+                $1, $2, $3, $4, $5, $6,
+                (SELECT office FROM managers WHERE id = $6)
+            )
+            RETURNING *
+            """,
+            data.get("full_name"),
+            data.get("birth_date"),
+            data.get("phone"),
+            data.get("address"),
+            data.get("extra", {}),
+            manager_id,
+        )
+        return dict(row)
+
+
+# ──────────── Office-aware листинги ────────────
+
+async def list_military_paginated_v2(
+    manager_id: int = None,
+    office_filter: str = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> tuple[list, int]:
+    """
+    Список военных с пагинацией. Office-aware.
+
+    Логика фильтров:
+    - manager_id (для роли manager) → видит только свои
+    - office_filter (для office_admin/supervisor) → весь офис
+    - оба None (для super_admin) → всё
+
+    Если оба указаны — применяются оба (на всякий случай для будущих сценариев).
+    """
+    pool = await get_pool()
+    offset = (page - 1) * page_size
+
+    where_parts = []
+    params = []
+    if manager_id is not None:
+        where_parts.append(f"pm.added_by = ${len(params) + 1}")
+        params.append(manager_id)
+    if office_filter is not None:
+        where_parts.append(f"pm.office = ${len(params) + 1}")
+        params.append(office_filter)
+
+    where_sql = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+
+    async with pool.acquire() as conn:
+        total = await conn.fetchval(
+            f"SELECT COUNT(*) FROM persons_military pm {where_sql}",
+            *params,
+        )
+        rows = await conn.fetch(
+            f"""
+            SELECT pm.*,
+                   (SELECT COUNT(*) FROM military_relatives mr
+                    WHERE mr.military_id = pm.id) AS relatives_count
+            FROM persons_military pm
+            {where_sql}
+            ORDER BY pm.created_at DESC
+            LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}
+            """,
+            *params, page_size, offset,
+        )
+        return [dict(r) for r in rows], (total or 0)
+
+
+async def list_military_without_relatives_v2(
+    manager_id: int = None,
+    office_filter: str = None,
+) -> list:
+    """
+    Военные без привязанных родственников. Office-aware.
+    Логика фильтров такая же как у list_military_paginated_v2.
+    """
+    where_parts = ["mr.id IS NULL"]
+    params = []
+    if manager_id is not None:
+        where_parts.append(f"pm.added_by = ${len(params) + 1}")
+        params.append(manager_id)
+    if office_filter is not None:
+        where_parts.append(f"pm.office = ${len(params) + 1}")
+        params.append(office_filter)
+
+    where_sql = "WHERE " + " AND ".join(where_parts)
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT pm.* FROM persons_military pm
+            LEFT JOIN military_relatives mr ON mr.military_id = pm.id
+            {where_sql}
+            ORDER BY pm.created_at DESC
+            """,
+            *params,
+        )
+        return [dict(r) for r in rows]
+
+
+async def get_military_by_id_office_check(military_id: int, office_filter: str = None) -> Optional[dict]:
+    """
+    Получить военного по id, но только если он в указанном офисе.
+    office_filter=None → без фильтра (super_admin).
+
+    Возвращает None если военного нет ИЛИ он в чужом офисе.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if office_filter is None:
+            row = await conn.fetchrow(
+                "SELECT * FROM persons_military WHERE id = $1",
+                military_id,
+            )
+        else:
+            row = await conn.fetchrow(
+                "SELECT * FROM persons_military WHERE id = $1 AND office = $2",
+                military_id, office_filter,
+            )
+        return dict(row) if row else None

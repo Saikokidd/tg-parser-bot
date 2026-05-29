@@ -19,8 +19,9 @@ from bot.parser.military_parser import (
     parse_military, validate_military, format_military_record
 )
 from bot.db.queries import (
-    find_military_duplicates, insert_military,
+    find_military_duplicates, insert_military,            # старые — пока оставлены для совместимости
     list_military_without_relatives, list_military_by_manager,
+    find_military_global_dup, insert_military_v2,         # этап B1: глобальный дубль + office при создании
 )
 from bot.keyboards.menus import confirm_military_with_dups_kb
 
@@ -88,18 +89,32 @@ async def receive_template(message: Message, state: FSMContext, manager: dict):
         )
         return
 
-    # Шаг 1: статус — проверка дублей
+    # Шаг 1: глобальный дубль-чек (этап B1 — мульти-офисность)
     status_msg = await message.answer("🔍 Проверка на дубликаты в базе...")
 
-    duplicates = []
-    if parsed.get('birth_date'):
-        duplicates = await find_military_duplicates(
-            full_name=parsed['full_name'],
-            birth_date=parsed['birth_date']
-        )
+    dup = await find_military_global_dup(
+        full_name=parsed['full_name'],
+        birth_date=parsed.get('birth_date'),
+    )
 
-    if duplicates:
-        # Дубль найден — спрашиваем подтверждения
+    if dup:
+        dup_office = dup.get('office')
+        my_office = manager.get('office')
+
+        # Дубль из чужого офиса (и наш офис известен и не совпадает) — жёсткий отказ.
+        # Если office_dup или my_office == None — считаем "своим" (исторические записи / не назначен).
+        if dup_office and my_office and dup_office != my_office:
+            await state.clear()
+            mgr_name = dup.get('manager_name') or '—'
+            await status_msg.edit_text(
+                f"⛔ Этот человек уже в работе у офиса <b>{dup_office}</b> "
+                f"(менеджер: <b>{mgr_name}</b>).\n\n"
+                f"Внесение запрещено.",
+                parse_mode="HTML",
+            )
+            return
+
+        # Дубль из своего офиса — показываем как раньше, спрашиваем подтверждения
         await state.update_data(
             parsed=parsed,
             manager_id=manager['id'],
@@ -107,9 +122,10 @@ async def receive_template(message: Message, state: FSMContext, manager: dict):
         )
         await state.set_state(MilitaryStates.waiting_dup_decision)
 
-        dup_text = "\n\n".join([format_military_record(d) for d in duplicates])
+        # Используем формат старой карточки — он уже умеет показывать
+        dup_text = format_military_record(dup)
         await status_msg.edit_text(
-            f"⚠️ *Найдены дубли в базе ({len(duplicates)} шт.):*\n\n"
+            f"⚠️ *Найден дубль в вашем офисе:*\n\n"
             f"{dup_text}\n\n"
             f"Всё равно внести?",
             parse_mode="Markdown",
@@ -152,7 +168,8 @@ async def _save_and_probit(target: Message, state: FSMContext, parsed: dict,
     target — сообщение, в чат которого слать ответы.
     manager_office — 'pvl' / 'dp', нужен для выбора счёта Sauron.
     """
-    record = await insert_military(parsed, manager_id)
+    # v2: автоматически проставляет office из manager.office
+    record = await insert_military_v2(parsed, manager_id)
     await target.answer(
         f"✅ *Сохранено в базу*\n\n"
         f"{record['full_name']}",

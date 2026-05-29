@@ -31,6 +31,7 @@ from bot.db.queries import (
     insert_relative,
     link_military_relative,
     get_military_by_id,
+    find_relative_global_dup, insert_relative_v2, get_manager_by_id,   # B1
 )
 
 logger = logging.getLogger(__name__)
@@ -381,6 +382,30 @@ async def attach_do(callback: CallbackQuery, state: FSMContext, manager: dict):
 
     relative_data = _build_relative_data_from_template(template)
 
+    # Глобальный дубль-чек (этап B1): если дубль из чужого офиса — жёсткий отказ
+    my_office = manager.get("office") if manager else None
+    global_dup = await find_relative_global_dup(
+        full_name=relative_data["full_name"],
+        birth_date=relative_data["birth_date"],
+        phone=relative_data["phone"],
+        address=relative_data["address"],
+    )
+    if global_dup:
+        dup_office = global_dup.get("office")
+        if dup_office and my_office and dup_office != my_office:
+            mgr_name = global_dup.get("manager_name") or "—"
+            await callback.message.answer(
+                f"⛔ Этот родственник уже в работе у офиса "
+                f"<b>{dup_office}</b> (менеджер: <b>{mgr_name}</b>).\n\n"
+                f"Закрепление запрещено.",
+                parse_mode="HTML",
+            )
+            try:
+                await callback.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            return
+
     # Проверяем дубли (2 из 4 полей)
     duplicates = await find_relative_duplicates(
         full_name=relative_data["full_name"],
@@ -428,7 +453,7 @@ async def attach_do(callback: CallbackQuery, state: FSMContext, manager: dict):
         return
 
     # Дубля нет — сразу сохраняем + создаём связку
-    rel = await insert_relative(relative_data, manager_id)
+    rel = await insert_relative_v2(relative_data, manager_id)
     await link_military_relative(military_id, rel["id"], manager_id)
 
     await callback.message.edit_reply_markup(reply_markup=None)
@@ -447,7 +472,7 @@ async def attach_dup_new(callback: CallbackQuery, state: FSMContext, manager: di
     manager_id, military_id, template = ctx
 
     relative_data = _build_relative_data_from_template(template)
-    rel = await insert_relative(relative_data, manager_id)
+    rel = await insert_relative_v2(relative_data, manager_id)
     await link_military_relative(military_id, rel["id"], manager_id)
 
     await callback.message.edit_text(

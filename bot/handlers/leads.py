@@ -25,6 +25,7 @@ from bot.db.queries import (
     delete_military_cascade, delete_relative_cascade,
     get_relative_by_id,
     update_relative_field, update_relative_extra,
+    list_military_paginated_v2, get_military_by_id_office_check,    # B1: office-aware
 )
 from bot.parser.military_parser import status_label
 from bot.parser.relative_parser import parse_date as parse_rel_date, normalize_phone
@@ -40,6 +41,54 @@ router = Router()
 
 PAGE_SIZE = 20
 
+# ──────────── B1: office-aware хелперы ────────────
+
+def _office_filter_for(role: str, office: str | None) -> str | None:
+    """
+    Определить какой office_filter применить в SELECT-запросах для текущей роли.
+
+    Возвращает:
+        None    — фильтр не нужен (super_admin видит всё)
+        'xxx'   — фильтровать по этому офису
+
+    Логика:
+    - super_admin → None (видит все офисы)
+    - office_admin/office_supervisor → свой офис
+    - manager → свой офис (страховка; основной фильтр у него по manager_id)
+    """
+    if role == "super_admin":
+        return None
+    return office  # для admin/supervisor/manager — их office из контекста
+
+
+def _can_access_military(military: dict, role: str, office: str | None,
+                          manager_id: int | None) -> bool:
+    """
+    Может ли текущий пользователь видеть/менять конкретного военного.
+
+    super_admin — может всё.
+    office_admin/office_supervisor — только лиды своего офиса.
+    manager — только свои лиды (added_by совпадает) и в своём офисе.
+
+    Защита от подделанных callback_data: даже если пришёл lead:show:N
+    с чужим N, мы не дадим открыть карточку.
+    """
+    if not military:
+        return False
+    if role == "super_admin":
+        return True
+    mil_office = military.get("office")
+    if role in ("office_admin", "office_supervisor"):
+        return mil_office == office
+    if role == "manager":
+        if military.get("added_by") != manager_id:
+            return False
+        # Перестраховка — если у лида другой office (теоретически не должно быть)
+        if mil_office and office and mil_office != office:
+            return False
+        return True
+    return False
+
 # Лейблы стандартных полей по их id
 FIELD_LABELS = {fid: label for fid, label, _ in EDIT_FIELDS}
 FIELD_TYPES = {fid: ftype for fid, label, ftype in EDIT_FIELDS}
@@ -54,14 +103,31 @@ class EditRelativeStates(StatesGroup):
 # ──────────── ВНУТРЕННЕЕ: рендеры ────────────
 
 async def _render_list(target_message: Message, manager: dict | None,
-                       is_admin: bool, is_supervisor: bool, page: int):
+                       is_admin: bool, is_supervisor: bool, page: int,
+                       role: str = None, office: str = None):
     """
     Отрендерить страницу списка лидов.
-    """
-    manager_id = None if (is_admin or is_supervisor) else manager['id']
 
-    records, total = await list_military_paginated(
-        manager_id=manager_id, page=page, page_size=PAGE_SIZE
+    Логика фильтров (B1 — мульти-офисность):
+    - super_admin → manager_id=None, office_filter=None → видит всё
+    - office_admin/supervisor → manager_id=None, office_filter=свой_офис
+    - manager → manager_id=свой, office_filter=None (office применится через added_by)
+    """
+    # Определяем manager_id для фильтра
+    if role == "manager":
+        manager_id = manager["id"] if manager else None
+    else:
+        # admin/supervisor видят всех менеджеров (своего офиса)
+        manager_id = None
+
+    # Определяем office_filter
+    office_filter = _office_filter_for(role, office)
+
+    records, total = await list_military_paginated_v2(
+        manager_id=manager_id,
+        office_filter=office_filter,
+        page=page,
+        page_size=PAGE_SIZE,
     )
 
     if not records:
@@ -155,21 +221,25 @@ def _format_lead_card(military: dict, relatives: list) -> str:
 
 @router.message(F.text == "Список лидов")
 async def btn_leads_list(message: Message, manager: dict | None,
-                         is_admin: bool, is_supervisor: bool):
+                         is_admin: bool, is_supervisor: bool,
+                         role: str = None, office: str = None):
     if not manager and not is_admin and not is_supervisor:
         await message.answer("Доступ запрещён.")
         return
-    await _render_list(message, manager, is_admin, is_supervisor, page=1)
+    await _render_list(message, manager, is_admin, is_supervisor, page=1,
+                       role=role, office=office)
 
 
 # ──────────── ПАГИНАЦИЯ ────────────
 
 @router.callback_query(F.data.startswith("lead:page:"))
 async def leads_page(callback: CallbackQuery, manager: dict | None,
-                     is_admin: bool, is_supervisor: bool):
+                     is_admin: bool, is_supervisor: bool,
+                     role: str = None, office: str = None):
     page = int(callback.data.split(":")[2])
     await callback.answer()
-    await _render_list(callback.message, manager, is_admin, is_supervisor, page=page)
+    await _render_list(callback.message, manager, is_admin, is_supervisor, page=page,
+                       role=role, office=office)
 
 
 @router.callback_query(F.data == "lead:noop")
@@ -179,19 +249,28 @@ async def leads_noop(callback: CallbackQuery):
 
 @router.callback_query(F.data == "lead:back")
 async def leads_back(callback: CallbackQuery, manager: dict | None,
-                     is_admin: bool, is_supervisor: bool):
+                     is_admin: bool, is_supervisor: bool,
+                     role: str = None, office: str = None):
     await callback.answer()
-    await _render_list(callback.message, manager, is_admin, is_supervisor, page=1)
+    await _render_list(callback.message, manager, is_admin, is_supervisor, page=1,
+                       role=role, office=office)
 
 
 # ──────────── КАРТОЧКА ЛИДА ────────────
 
 @router.callback_query(F.data.startswith("lead:show:"))
-async def lead_show(callback: CallbackQuery):
+async def lead_show(callback: CallbackQuery, manager: dict | None = None,
+                    role: str = None, office: str = None):
     military_id = int(callback.data.split(":")[2])
     military = await get_military_by_id(military_id)
     if not military:
         await callback.answer("Лид не найден.", show_alert=True)
+        return
+
+    # B1: проверка офисного доступа
+    manager_id = manager["id"] if manager else None
+    if not _can_access_military(military, role, office, manager_id):
+        await callback.answer("Лид недоступен.", show_alert=True)
         return
 
     relatives = await get_relatives_of_military(military_id)
@@ -209,11 +288,18 @@ async def lead_show(callback: CallbackQuery):
 # ──────────── УДАЛЕНИЕ ЛИДА ────────────
 
 @router.callback_query(F.data.startswith("lead:del:"))
-async def lead_delete_confirm(callback: CallbackQuery):
+async def lead_delete_confirm(callback: CallbackQuery, manager: dict | None = None,
+                              role: str = None, office: str = None):
     military_id = int(callback.data.split(":")[2])
     military = await get_military_by_id(military_id)
     if not military:
         await callback.answer("Лид не найден.", show_alert=True)
+        return
+
+    # B1: проверка офисного доступа
+    manager_id = manager["id"] if manager else None
+    if not _can_access_military(military, role, office, manager_id):
+        await callback.answer("Лид недоступен.", show_alert=True)
         return
 
     relatives = await get_relatives_of_military(military_id)
@@ -231,11 +317,18 @@ async def lead_delete_confirm(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("lead:del_yes:"))
 async def lead_delete_do(callback: CallbackQuery, manager: dict | None,
-                         is_admin: bool, is_supervisor: bool):
+                         is_admin: bool, is_supervisor: bool,
+                         role: str = None, office: str = None):
     military_id = int(callback.data.split(":")[2])
     military = await get_military_by_id(military_id)
     if not military:
         await callback.answer("Лид не найден.", show_alert=True)
+        return
+
+    # B1: проверка офисного доступа
+    manager_id = manager["id"] if manager else None
+    if not _can_access_military(military, role, office, manager_id):
+        await callback.answer("Лид недоступен.", show_alert=True)
         return
 
     deleted_relatives = await delete_military_cascade(military_id)
@@ -246,16 +339,25 @@ async def lead_delete_do(callback: CallbackQuery, manager: dict | None,
         parse_mode="Markdown"
     )
 
-    await _render_list(callback.message, manager, is_admin, is_supervisor, page=1)
+    await _render_list(callback.message, manager, is_admin, is_supervisor, page=1,
+                       role=role, office=office)
 
 
 # ──────────── УДАЛЕНИЕ РОДСТВЕННИКА ────────────
 
 @router.callback_query(F.data.startswith("rel:del:"))
-async def relative_delete_confirm(callback: CallbackQuery):
+async def relative_delete_confirm(callback: CallbackQuery, manager: dict | None = None,
+                                  role: str = None, office: str = None):
     parts = callback.data.split(":")
     relative_id = int(parts[2])
     military_id = int(parts[3])
+
+    # Проверка офисного доступа через военного-владельца
+    military = await get_military_by_id(military_id)
+    manager_id = manager["id"] if manager else None
+    if not _can_access_military(military, role, office, manager_id):
+        await callback.answer("Запись недоступна.", show_alert=True)
+        return
 
     relative = await get_relative_by_id(relative_id)
     if not relative:
@@ -272,10 +374,18 @@ async def relative_delete_confirm(callback: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("rel:del_yes:"))
-async def relative_delete_do(callback: CallbackQuery):
+async def relative_delete_do(callback: CallbackQuery, manager: dict | None = None,
+                             role: str = None, office: str = None):
     parts = callback.data.split(":")
     relative_id = int(parts[2])
     military_id = int(parts[3])
+
+    # Проверка офисного доступа
+    military = await get_military_by_id(military_id)
+    manager_id = manager["id"] if manager else None
+    if not _can_access_military(military, role, office, manager_id):
+        await callback.answer("Запись недоступна.", show_alert=True)
+        return
 
     relative = await get_relative_by_id(relative_id)
     if relative:
@@ -284,7 +394,6 @@ async def relative_delete_do(callback: CallbackQuery):
     else:
         await callback.answer("Уже удалено.")
 
-    military = await get_military_by_id(military_id)
     if not military:
         await callback.message.edit_text("Лид удалён.")
         return
@@ -298,11 +407,19 @@ async def relative_delete_do(callback: CallbackQuery):
 # ──────────── ДОПОЛНИТЬ ЛИЦО (из карточки) ────────────
 
 @router.callback_query(F.data.startswith("lead:addrel:"))
-async def lead_add_relative(callback: CallbackQuery, state: FSMContext, manager: dict | None):
+async def lead_add_relative(callback: CallbackQuery, state: FSMContext,
+                             manager: dict | None,
+                             role: str = None, office: str = None):
     military_id = int(callback.data.split(":")[2])
     military = await get_military_by_id(military_id)
     if not military:
         await callback.answer("Лид не найден.", show_alert=True)
+        return
+
+    # B1: проверка офисного доступа
+    manager_id = manager["id"] if manager else None
+    if not _can_access_military(military, role, office, manager_id):
+        await callback.answer("Лид недоступен.", show_alert=True)
         return
 
     if manager:
@@ -327,11 +444,19 @@ async def lead_add_relative(callback: CallbackQuery, state: FSMContext, manager:
 # ════════════════════════════════════════════════════════════
 
 @router.callback_query(F.data.startswith("rel:edit:"))
-async def relative_edit_menu(callback: CallbackQuery):
+async def relative_edit_menu(callback: CallbackQuery, manager: dict | None = None,
+                             role: str = None, office: str = None):
     """Показать меню выбора поля для редактирования"""
     parts = callback.data.split(":")
     relative_id = int(parts[2])
     military_id = int(parts[3])
+
+    # B1: проверка офисного доступа через военного-владельца
+    military = await get_military_by_id(military_id)
+    manager_id = manager["id"] if manager else None
+    if not _can_access_military(military, role, office, manager_id):
+        await callback.answer("Запись недоступна.", show_alert=True)
+        return
 
     relative = await get_relative_by_id(relative_id)
     if not relative:
@@ -371,12 +496,21 @@ async def relative_edit_menu(callback: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("rel:editfield:"))
-async def relative_edit_field(callback: CallbackQuery, state: FSMContext):
+async def relative_edit_field(callback: CallbackQuery, state: FSMContext,
+                              manager: dict | None = None,
+                              role: str = None, office: str = None):
     """Выбрано конкретное поле — спрашиваем новое значение"""
     parts = callback.data.split(":")
     relative_id = int(parts[2])
     military_id = int(parts[3])
     field_id = parts[4]
+
+    # B1: проверка офисного доступа через военного-владельца
+    military = await get_military_by_id(military_id)
+    manager_id = manager["id"] if manager else None
+    if not _can_access_military(military, role, office, manager_id):
+        await callback.answer("Запись недоступна.", show_alert=True)
+        return
 
     await state.set_state(EditRelativeStates.waiting_value)
     await state.update_data(
