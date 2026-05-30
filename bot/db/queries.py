@@ -138,75 +138,6 @@ async def update_manager_office(manager_id: int, office: str) -> None:
 #                       ВОЕННЫЕ
 # ════════════════════════════════════════════════════════════
 
-async def find_military_duplicates(full_name: str = None, birth_date=None) -> list:
-    """
-    Поиск дублей военного.
-
-    Стратегия:
-    1. Если есть и ФИО и ДР — ищем точные совпадения ФИО+ДР,
-       а также записи с тем же ФИО но БЕЗ ДР (это потенциальный дубль).
-    2. Если есть только ФИО (ДР=None) — ищем по ФИО любые записи:
-       и без ДР, и с ДР (любой может оказаться этим же человеком).
-
-    Записи с точным совпадением ФИО+ДР идут первыми.
-    """
-    if not full_name:
-        return []
-
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        if birth_date is not None:
-            # Есть ДР — ищем строгие дубли + дубли без ДР
-            rows = await conn.fetch(
-                """
-                SELECT pm.*, m.name as manager_name
-                FROM persons_military pm
-                LEFT JOIN managers m ON pm.added_by = m.id
-                WHERE LOWER(pm.full_name) = LOWER($1)
-                  AND (pm.birth_date = $2 OR pm.birth_date IS NULL)
-                ORDER BY 
-                    CASE WHEN pm.birth_date = $2 THEN 0 ELSE 1 END,
-                    pm.created_at DESC
-                """,
-                full_name, birth_date
-            )
-        else:
-            # ДР нет — ищем по ФИО любые записи
-            rows = await conn.fetch(
-                """
-                SELECT pm.*, m.name as manager_name
-                FROM persons_military pm
-                LEFT JOIN managers m ON pm.added_by = m.id
-                WHERE LOWER(pm.full_name) = LOWER($1)
-                ORDER BY 
-                    CASE WHEN pm.birth_date IS NULL THEN 0 ELSE 1 END,
-                    pm.created_at DESC
-                """,
-                full_name
-            )
-        return [dict(r) for r in rows]
-
-
-async def insert_military(data: dict, manager_id: int) -> dict:
-    """Вставить нового военного"""
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO persons_military
-                (full_name, birth_date, status, extra, added_by)
-            VALUES ($1, $2, $3, $4, $5)
-            RETURNING *
-            """,
-            data.get("full_name"),
-            data.get("birth_date"),
-            data.get("status"),  # 'killed' / 'missing'
-            data.get("extra", {}),
-            manager_id
-        )
-        return dict(row)
-
-
 async def get_military_by_id(military_id: int) -> Optional[dict]:
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -230,93 +161,6 @@ async def list_military_by_manager(manager_id: int) -> list:
             manager_id
         )
         return [dict(r) for r in rows]
-
-
-async def list_military_without_relatives(manager_id: int = None) -> list:
-    """
-    Военные у которых нет НИ ОДНОЙ привязки в military_relatives.
-    Если manager_id указан — только записи этого менеджера.
-    """
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        if manager_id:
-            rows = await conn.fetch(
-                """
-                SELECT pm.* FROM persons_military pm
-                LEFT JOIN military_relatives mr ON mr.military_id = pm.id
-                WHERE mr.id IS NULL AND pm.added_by = $1
-                ORDER BY pm.created_at DESC
-                """,
-                manager_id
-            )
-        else:
-            rows = await conn.fetch(
-                """
-                SELECT pm.* FROM persons_military pm
-                LEFT JOIN military_relatives mr ON mr.military_id = pm.id
-                WHERE mr.id IS NULL
-                ORDER BY pm.created_at DESC
-                """
-            )
-        return [dict(r) for r in rows]
-
-
-
-# ════════════════════════════════════════════════════════════
-#                       РОДСТВЕННИКИ
-# ════════════════════════════════════════════════════════════
-
-async def find_relative_duplicates(full_name: str = None, birth_date=None,
-                                    phone: str = None, address: str = None) -> list:
-    """
-    Дубли родственника: совпадение 2 из 4 (ФИО, ДР, телефон, адрес).
-    Адрес сравниваем по нормализованному виду (lower + strip знаков).
-    """
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT r.*, m.name as manager_name,
-                   (
-                       (CASE WHEN $1::text IS NOT NULL AND LOWER(r.full_name) = LOWER($1) THEN 1 ELSE 0 END) +
-                       (CASE WHEN $2::date IS NOT NULL AND r.birth_date = $2 THEN 1 ELSE 0 END) +
-                       (CASE WHEN $3::text IS NOT NULL AND r.phone = $3 THEN 1 ELSE 0 END) +
-                       (CASE WHEN $4::text IS NOT NULL AND LOWER(r.address) = LOWER($4) THEN 1 ELSE 0 END)
-                   ) as match_count
-            FROM relatives r
-            LEFT JOIN managers m ON r.added_by = m.id
-            WHERE (
-                (CASE WHEN $1::text IS NOT NULL AND LOWER(r.full_name) = LOWER($1) THEN 1 ELSE 0 END) +
-                (CASE WHEN $2::date IS NOT NULL AND r.birth_date = $2 THEN 1 ELSE 0 END) +
-                (CASE WHEN $3::text IS NOT NULL AND r.phone = $3 THEN 1 ELSE 0 END) +
-                (CASE WHEN $4::text IS NOT NULL AND LOWER(r.address) = LOWER($4) THEN 1 ELSE 0 END)
-            ) >= 2
-            ORDER BY match_count DESC
-            """,
-            full_name, birth_date, phone, address
-        )
-        return [dict(r) for r in rows]
-
-
-async def insert_relative(data: dict, manager_id: int) -> dict:
-    """Создать запись родственника"""
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO relatives
-                (full_name, birth_date, phone, address, extra, added_by)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            RETURNING *
-            """,
-            data.get("full_name"),
-            data.get("birth_date"),
-            data.get("phone"),
-            data.get("address"),
-            data.get("extra", {}),
-            manager_id
-        )
-        return dict(row)
 
 
 async def link_military_relative(military_id: int, relative_id: int, manager_id: int) -> bool:
@@ -473,58 +317,6 @@ async def stats_for_all_managers(since=None, office_filter: str | None = None) -
     
 # ════════════════════════════════════════════════════════════
 #                       СПИСОК ЛИДОВ (с пагинацией)
-# ════════════════════════════════════════════════════════════
-
-async def list_military_paginated(
-    manager_id: int = None,
-    page: int = 1,
-    page_size: int = 20
-) -> tuple[list, int]:
-    """
-    Список ВСЕХ военных с пагинацией.
-    Если manager_id указан — только записи этого менеджера, иначе все.
-    
-    Возвращает кортеж (records, total_count).
-    """
-    pool = await get_pool()
-    offset = (page - 1) * page_size
-
-    async with pool.acquire() as conn:
-        if manager_id:
-            total = await conn.fetchval(
-                "SELECT COUNT(*) FROM persons_military WHERE added_by = $1",
-                manager_id
-            )
-            rows = await conn.fetch(
-                """
-                SELECT pm.*,
-                       (SELECT COUNT(*) FROM military_relatives mr
-                        WHERE mr.military_id = pm.id) AS relatives_count
-                FROM persons_military pm
-                WHERE pm.added_by = $1
-                ORDER BY pm.created_at DESC
-                LIMIT $2 OFFSET $3
-                """,
-                manager_id, page_size, offset
-            )
-        else:
-            total = await conn.fetchval("SELECT COUNT(*) FROM persons_military")
-            rows = await conn.fetch(
-                """
-                SELECT pm.*,
-                       (SELECT COUNT(*) FROM military_relatives mr
-                        WHERE mr.military_id = pm.id) AS relatives_count
-                FROM persons_military pm
-                ORDER BY pm.created_at DESC
-                LIMIT $1 OFFSET $2
-                """,
-                page_size, offset
-            )
-        return [dict(r) for r in rows], (total or 0)
-
-
-# ════════════════════════════════════════════════════════════
-#                       УДАЛЕНИЕ
 # ════════════════════════════════════════════════════════════
 
 async def delete_military_cascade(military_id: int) -> int:
@@ -1111,15 +903,6 @@ async def cost_stats_no_attach(since=None) -> dict:
 #       МУЛЬТИ-ОФИСНОСТЬ — ЭТАП B
 #
 # Здесь живут функции которые знают про office.
-# Старые функции (find_military_duplicates, find_relative_duplicates*,
-# list_military_paginated, list_military_without_relatives) пока
-# оставлены для backward compat — будут удалены в этапе B3
-# после того как все хендлеры переведены на новые.
-# ════════════════════════════════════════════════════════════
-
-
-# ──────────── Глобальная дубль-детекция ────────────
-
 async def find_military_global_dup(full_name: str, birth_date=None) -> Optional[dict]:
     """
     Глобальный дубль-чек военного по всей БД (игнорирует office).

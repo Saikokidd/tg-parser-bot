@@ -19,8 +19,7 @@ from bot.parser.military_parser import (
     parse_military, validate_military, format_military_record
 )
 from bot.db.queries import (
-    find_military_duplicates, insert_military,            # старые — пока оставлены для совместимости
-    list_military_without_relatives, list_military_by_manager,
+    list_military_by_manager,
     find_military_global_dup, insert_military_v2,         # этап B1: глобальный дубль + office при создании
 )
 from bot.keyboards.menus import confirm_military_with_dups_kb

@@ -27,8 +27,6 @@ from bot.keyboards.menus import (
 )
 from bot.utils.long_message import safe_edit_or_send
 from bot.db.queries import (
-    find_relative_duplicates,
-    insert_relative,
     link_military_relative,
     get_military_by_id,
     find_relative_global_dup, insert_relative_v2, get_manager_by_id,   # B1
@@ -288,7 +286,7 @@ async def probiv_done(callback: CallbackQuery, state: FSMContext):
 
 def _build_relative_data_from_template(template: dict) -> dict:
     """
-    Преобразовать шаблон из Sauron в формат данных для insert_relative.
+    Преобразовать шаблон из Sauron в формат данных для insert_relative_v2.
     Извлекает все доступные поля + кладёт обогащение (operator, region) в extra.
     """
     # birth_date_str → date
@@ -406,24 +404,19 @@ async def attach_do(callback: CallbackQuery, state: FSMContext, manager: dict):
                 pass
             return
 
-    # Проверяем дубли (2 из 4 полей)
-    duplicates = await find_relative_duplicates(
-        full_name=relative_data["full_name"],
-        birth_date=relative_data["birth_date"],
-        phone=relative_data["phone"],
-        address=relative_data["address"],
-    )
-
-    if duplicates:
+    # B4: дубль-чек переиспользует global_dup из B1-блока выше.
+    # Сюда мы попадаем только если дубля нет совсем, ИЛИ дубль в своём офисе.
+    # global_dup имеет все поля для плашки (id, full_name, birth_date, phone, address).
+    if global_dup:
         # Запомним что хотим закрепить — для последующих коллбэков "Закрепить как нового / Использовать"
         data = await state.get_data()
         pending = data.get("attach_pending", {})
         pending[idx_str] = {
-            "duplicate_id": duplicates[0]["id"],
+            "duplicate_id": global_dup["id"],
         }
         await state.update_data(attach_pending=pending)
 
-        dup = duplicates[0]
+        dup = global_dup
         dup_birth = dup.get("birth_date")
         dup_birth_str = dup_birth.strftime("%d.%m.%Y") if dup_birth else "—"
         # Экранирование пользовательских строк для HTML.

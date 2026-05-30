@@ -20,8 +20,8 @@ from bot.parser.relative_parser import (
 
 from bot.parser.military_parser import status_label
 from bot.db.queries import (
-    list_military_without_relatives, list_military_by_manager, get_military_by_id,
-    find_relative_duplicates_with_links, insert_relative, link_military_relative,
+    list_military_without_relatives_v2, list_military_by_manager, get_military_by_id,
+    find_relative_duplicates_with_links, link_military_relative,
     find_relative_global_dup, insert_relative_v2,    # B1: глобальный дубль + office
 )
 from bot.keyboards.menus import (
@@ -57,7 +57,10 @@ async def btn_fill_relatives(message: Message, state: FSMContext, manager: dict 
         await message.answer("Доступно только менеджерам.")
         return
 
-    pending = await list_military_without_relatives(manager_id=manager['id'])
+    pending = await list_military_without_relatives_v2(
+        manager_id=manager['id'],
+        office_filter=manager.get('office'),
+    )
 
     if pending:
         await message.answer(

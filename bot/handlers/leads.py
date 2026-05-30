@@ -20,7 +20,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 from bot.db.queries import (
-    list_military_paginated, get_military_by_id,
+    get_military_by_id,
     get_relatives_of_military,
     delete_military_cascade, delete_relative_cascade,
     get_relative_by_id,
