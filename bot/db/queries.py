@@ -1459,3 +1459,38 @@ async def is_phone_taken(phone: str) -> bool:
             last10,
         )
         return row is not None
+
+
+async def find_phone_owner_office(phone: str) -> str | None:
+    """
+    Найти офис родственника по номеру телефона.
+    Сравниваем по последним 10 цифрам (нечувствительно к +/без+).
+
+    Возвращает:
+    - 'pvl' / 'dp' / 'ha' — если родственник найден и у него есть office
+    - None — если номер не в БД или родственник без office
+
+    Если у нескольких родственников один номер (legacy дубли) —
+    берём первого по id (самого старого).
+    """
+    if not phone:
+        return None
+    import re as _re_phone
+    digits = _re_phone.sub(r'\D', '', phone)
+    if len(digits) < 10:
+        return None
+    last10 = digits[-10:]
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT office FROM relatives
+            WHERE RIGHT(regexp_replace(COALESCE(phone, ''), '\\D', '', 'g'), 10) = $1
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            last10,
+        )
+        return row["office"] if row else None
+
+

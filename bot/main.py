@@ -14,9 +14,12 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from bot.db.connection import get_pool, close_pool
 from bot.handlers import commands, admin, military, relatives, probiv, stats, leads, export, cost, search, errors
+from bot.api_server import start_api_server
 from bot.middlewares.access import AccessMiddleware
 from bot.utils.logging_config import setup_logging
 from bot.services.voxlink_enricher import enricher_loop
+from bot.api_server import start_api_server
+
 setup_logging()
 
 logger = logging.getLogger(__name__)
@@ -53,11 +56,23 @@ async def main():
     enricher_task = asyncio.create_task(enricher_loop())
     logger.info("voxlink_enricher started in background")
 
+    # HTTP API сервер для внешних агентов (например ha CRM)
+    api_runner = None
+    api_port_env = os.getenv("API_PORT")
+    if api_port_env:
+        try:
+            api_runner = await start_api_server(int(api_port_env))
+        except Exception:
+            logger.exception("api: failed to start, продолжаем без HTTP API")
+
     logger.info("Bot started")
 
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
+        if api_runner is not None:
+            await api_runner.cleanup()
+            logger.info("api: stopped")
         enricher_task.cancel()
         try:
             await enricher_task
