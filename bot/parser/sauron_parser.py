@@ -255,6 +255,42 @@ def _pick_most_common(records: list[dict], field: str) -> Optional[str]:
     return best_orig
 
 
+def _pick_phone_candidates(records: list[dict]) -> list[str]:
+    """
+    Собрать кандидатов на phone, отсортированных по убыванию частоты.
+    Возвращает список оригиналов (в том виде, что в API).
+    Самый частый идёт первым.
+
+    Использует ту же логику нормализации что и _pick_most_common,
+    но возвращает весь упорядоченный список, а не только лучшего.
+    """
+    api_keys = FIELD_API_KEYS["phone"]
+
+    pairs = []
+    for r in records:
+        for key in api_keys:
+            if key in r and r[key]:
+                original = str(r[key]).strip()
+                norm = _normalize_for_count("phone", original)
+                if norm:
+                    pairs.append((norm, original))
+
+    if not pairs:
+        return []
+
+    norm_counter = Counter(p[0] for p in pairs)
+
+    # Идём по нормализованным от самых частых
+    result = []
+    for best_norm, _ in norm_counter.most_common():
+        # Среди оригиналов с этим нормализованным — берём самый частый оригинал
+        originals = [p[1] for p in pairs if p[0] == best_norm]
+        best_orig, _ = Counter(originals).most_common(1)[0]
+        result.append(best_orig)
+
+    return result
+
+
 def build_relative_template(api_result: dict) -> dict:
     """
     Собрать данные для шаблона родственника на основе всех записей API.
@@ -271,15 +307,14 @@ def build_relative_template(api_result: dict) -> dict:
         value = _pick_most_common(records, field)
         if not value:
             continue
-
         if field == "birth_date":
             template["birth_date_str"] = _format_api_date(value)
         else:
             template[field] = value
-
     # Дополнительно — собираем топ-3 уникальных email для последующей валидации
     template["emails_top"] = _pick_top_n_unique(records, "email", n=3)
-
+    # Все кандидаты телефонов по убыванию частоты — для выбора свободного в БД
+    template["phone_candidates"] = _pick_phone_candidates(records)
     return template
 
 

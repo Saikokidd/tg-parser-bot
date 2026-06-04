@@ -1203,3 +1203,259 @@ async def move_manager_with_data_to_office(manager_id: int, new_office: str) -> 
                 'military_moved': mil_count or 0,
                 'relatives_moved': rel_count or 0,
             }
+            
+            
+# ──────────── Универсальный поиск лидов (Q-Найти лида) ────────────
+
+# Парсер запроса: что в нём — дата, телефон, или текст ФИО.
+import re as _re_search
+
+
+def _parse_search_query(query: str) -> dict:
+    """
+    Разбирает строку поиска на компоненты.
+    Возвращает {
+        'birth_date': date | None,      # если в строке есть дата ДД.ММ.ГГГГ
+        'phone_last10': str | None,     # последние 10 цифр если в строке ≥10 цифр подряд
+        'name_part': str | None,        # текст без даты и телефона (для ФИО)
+    }
+    """
+    from datetime import date as _date
+
+    result = {'birth_date': None, 'phone_last10': None, 'name_part': None}
+    q = (query or '').strip()
+    if not q:
+        return result
+
+    # Дата ДД.ММ.ГГГГ или ДД-ММ-ГГГГ или ДД/ММ/ГГГГ
+    m_date = _re_search.search(
+        r'(\d{1,2})[./\-](\d{1,2})[./\-](\d{4})',
+        q,
+    )
+    if m_date:
+        try:
+            d, mn, y = m_date.groups()
+            result['birth_date'] = _date(int(y), int(mn), int(d))
+            q = q.replace(m_date.group(0), ' ').strip()
+        except ValueError:
+            pass  # некорректная дата — игнорируем
+
+    # Телефон: ≥10 цифр подряд (с возможными разделителями + ( ) - пробел)
+    # Чистим все нецифры, если осталось ≥10 — берём последние 10
+    digits_only = _re_search.sub(r'\D', '', q)
+    if len(digits_only) >= 10:
+        result['phone_last10'] = digits_only[-10:]
+        # Убираем из текста всё что похоже на телефон (длинная последовательность цифр и разделителей)
+        q = _re_search.sub(r'[\d\s\+\(\)\-]{10,}', ' ', q).strip()
+
+    # Остальное — имя
+    q = _re_search.sub(r'\s+', ' ', q).strip()
+    if q:
+        result['name_part'] = q
+
+    return result
+
+
+async def search_leads(query: str, role: str, office: str | None,
+                       manager_id: int | None, limit: int = 20) -> dict:
+    """
+    Универсальный поиск военных и родственников.
+
+    Поиск:
+    - Если в query есть text → ищем по full_name (ILIKE %text%)
+    - Если есть дата → AND по birth_date = date
+    - Если есть телефон (≥10 цифр) → ищем родственников по phone (last 10)
+
+    Доступ (изоляция офисов B1):
+    - role='super_admin' → видит всё
+    - role='office_admin'/'office_supervisor' → только свой office
+    - role='manager' → только свои лиды (pm.added_by = manager_id) + свой office
+
+    Возвращает:
+        {
+            'military': [...],         # до limit штук
+            'military_total': int,      # сколько всего найдено (для "найдено N, показано M")
+            'relatives': [...],
+            'relatives_total': int,
+        }
+
+    Каждая запись в 'military':
+        id, full_name, birth_date, office, added_by, manager_name,
+        relatives_count (привязанных)
+
+    Каждая запись в 'relatives':
+        id, full_name, birth_date, phone, office, added_by, manager_name,
+        attached_to: list[{military_id, full_name, birth_date}]
+    """
+    parsed = _parse_search_query(query)
+    if not parsed['birth_date'] and not parsed['phone_last10'] and not parsed['name_part']:
+        return {'military': [], 'military_total': 0,
+                'relatives': [], 'relatives_total': 0}
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # ───── Военные ─────
+        mil_where = []
+        mil_params = []
+
+        if parsed['name_part']:
+            mil_params.append(f"%{parsed['name_part']}%")
+            mil_where.append(f"pm.full_name ILIKE ${len(mil_params)}")
+
+        if parsed['birth_date']:
+            mil_params.append(parsed['birth_date'])
+            mil_where.append(f"pm.birth_date = ${len(mil_params)}")
+
+        # Доступ
+        if role == 'manager':
+            mil_params.append(manager_id)
+            mil_where.append(f"pm.added_by = ${len(mil_params)}")
+            if office:
+                mil_params.append(office)
+                mil_where.append(f"pm.office = ${len(mil_params)}")
+        elif role in ('office_admin', 'office_supervisor') and office:
+            mil_params.append(office)
+            mil_where.append(f"pm.office = ${len(mil_params)}")
+        # super_admin → без фильтра
+
+        military = []
+        military_total = 0
+
+        # Телефонный запрос → военных не ищем (у них нет phone)
+        if mil_where and not (parsed['phone_last10'] and not parsed['name_part'] and not parsed['birth_date']):
+            mil_where_sql = " AND ".join(mil_where)
+            military_total = await conn.fetchval(
+                f"SELECT COUNT(*) FROM persons_military pm WHERE {mil_where_sql}",
+                *mil_params,
+            )
+            mil_params_with_limit = mil_params + [limit]
+            rows = await conn.fetch(
+                f"""
+                SELECT pm.id, pm.full_name, pm.birth_date, pm.office, pm.added_by,
+                       m.name AS manager_name,
+                       (SELECT COUNT(*) FROM military_relatives mr 
+                        WHERE mr.military_id = pm.id) AS relatives_count
+                FROM persons_military pm
+                LEFT JOIN managers m ON m.id = pm.added_by
+                WHERE {mil_where_sql}
+                ORDER BY pm.created_at DESC
+                LIMIT ${len(mil_params_with_limit)}
+                """,
+                *mil_params_with_limit,
+            )
+            military = [dict(r) for r in rows]
+
+        # ───── Родственники ─────
+        rel_where = []
+        rel_params = []
+
+        if parsed['name_part']:
+            rel_params.append(f"%{parsed['name_part']}%")
+            rel_where.append(f"r.full_name ILIKE ${len(rel_params)}")
+
+        if parsed['birth_date']:
+            rel_params.append(parsed['birth_date'])
+            rel_where.append(f"r.birth_date = ${len(rel_params)}")
+
+        if parsed['phone_last10']:
+            # Сравниваем "только цифры", берём last 10
+            # regexp_replace убирает нецифры из r.phone, потом сравниваем хвост
+            rel_params.append(parsed['phone_last10'])
+            rel_where.append(
+                f"RIGHT(regexp_replace(COALESCE(r.phone,''), '\\D', '', 'g'), 10) = ${len(rel_params)}"
+            )
+
+        # Доступ
+        if role == 'manager':
+            rel_params.append(manager_id)
+            rel_where.append(f"r.added_by = ${len(rel_params)}")
+            if office:
+                rel_params.append(office)
+                rel_where.append(f"r.office = ${len(rel_params)}")
+        elif role in ('office_admin', 'office_supervisor') and office:
+            rel_params.append(office)
+            rel_where.append(f"r.office = ${len(rel_params)}")
+
+        relatives = []
+        relatives_total = 0
+
+        if rel_where:
+            rel_where_sql = " AND ".join(rel_where)
+            relatives_total = await conn.fetchval(
+                f"SELECT COUNT(*) FROM relatives r WHERE {rel_where_sql}",
+                *rel_params,
+            )
+            rel_params_with_limit = rel_params + [limit]
+            rows = await conn.fetch(
+                f"""
+                SELECT r.id, r.full_name, r.birth_date, r.phone, r.office, r.added_by,
+                       m.name AS manager_name
+                FROM relatives r
+                LEFT JOIN managers m ON m.id = r.added_by
+                WHERE {rel_where_sql}
+                ORDER BY r.created_at DESC
+                LIMIT ${len(rel_params_with_limit)}
+                """,
+                *rel_params_with_limit,
+            )
+            relatives = [dict(r) for r in rows]
+
+            # Подтянем "к каким военным привязан" каждый найденный родственник
+            if relatives:
+                rel_ids = [r['id'] for r in relatives]
+                links = await conn.fetch(
+                    """
+                    SELECT mr.relative_id, pm.id AS military_id, pm.full_name, pm.birth_date
+                    FROM military_relatives mr
+                    JOIN persons_military pm ON pm.id = mr.military_id
+                    WHERE mr.relative_id = ANY($1::int[])
+                    ORDER BY mr.created_at DESC
+                    """,
+                    rel_ids,
+                )
+                by_rel = {}
+                for ln in links:
+                    by_rel.setdefault(ln['relative_id'], []).append({
+                        'military_id': ln['military_id'],
+                        'full_name': ln['full_name'],
+                        'birth_date': ln['birth_date'],
+                    })
+                for r in relatives:
+                    r['attached_to'] = by_rel.get(r['id'], [])
+
+        return {
+            'military': military,
+            'military_total': military_total or 0,
+            'relatives': relatives,
+            'relatives_total': relatives_total or 0,
+        }
+        
+        
+# ──────────── Проверка занятости номера телефона ────────────
+
+async def is_phone_taken(phone: str) -> bool:
+    """
+    Проверяет, есть ли уже в БД родственник с таким номером телефона.
+    Сравниваем по последним 10 цифрам (нечувствительно к +/без+, форматированию).
+
+    Возвращает True если номер уже у кого-то в БД, иначе False.
+    Пустой/мусорный (<10 цифр) phone → False.
+    """
+    if not phone:
+        return False
+    import re as _re_phone
+    digits = _re_phone.sub(r'\D', '', phone)
+    if len(digits) < 10:
+        return False
+    last10 = digits[-10:]
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT 1 FROM relatives
+            WHERE RIGHT(regexp_replace(COALESCE(phone, ''), '\\D', '', 'g'), 10) = $1
+            LIMIT 1
+            """,
+            last10,
+        )
+        return row is not None

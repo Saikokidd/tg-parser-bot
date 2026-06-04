@@ -41,6 +41,7 @@ def admin_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👥 Менеджеры", callback_data="admin:managers")],
         [InlineKeyboardButton(text="💰 Расход на пробив", callback_data="admin:cost")],
+        [InlineKeyboardButton(text="🔎 Поиск лида", callback_data="admin:search")],
     ])
 
 
@@ -231,9 +232,14 @@ def add_more_relatives_kb(military_id: int) -> InlineKeyboardMarkup:
 # ════════════════════════════════════════════════════════════
 #                       ПРОБИВ
 # ════════════════════════════════════════════════════════════
-# Максимум кнопок в одном сообщении — Telegram лимит на reply_markup ~10KB.
-# С учётом длинных ФИО + emoji + callback_data — безопасно держим до 15.
-PROBIV_BUTTONS_MAX = 15
+# Максимум кнопок в одном сообщении.
+# Telegram-лимит на inline_keyboard: до 100 кнопок в массиве,
+# callback_data ≤ 64 байт. У нас короткий callback (probiv:next:N),
+# держим 30 — покрывает 99% реальных ответов Sauron.
+# Если когда-то Sauron вернёт больше — последние имена показаны
+# в тексте, но кнопок для них не будет; в таком случае поднять
+# лимит или добавить пагинацию.
+PROBIV_BUTTONS_MAX = 30
 
 
 def probiv_persons_kb(blocks: list[dict]) -> InlineKeyboardMarkup:
@@ -587,6 +593,52 @@ def cost_period_kb(section: str, period: str = "week",
     ])
     rows.append([
         InlineKeyboardButton(text="« К меню расхода", callback_data="admin:cost"),
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# ──────────── Поиск лида (Q-Найти лида) ────────────
+
+def search_results_kb(military: list[dict], relatives: list[dict]) -> InlineKeyboardMarkup:
+    """
+    Клавиатура с результатами поиска.
+    Кнопки:
+        🪖 ФИО ДД.ММ.ГГГГ            → откроет карточку военного
+        👨‍👩 ФИО ДД.ММ.ГГГГ           → откроет карточку лида к которому привязан родственник
+        « Закрыть
+    Каждая кнопка с коротким callback (search:m:ID или search:r:ID).
+    """
+    rows = []
+
+    for m in military:
+        birth = m.get("birth_date")
+        birth_str = birth.strftime("%d.%m.%Y") if birth else "—"
+        label = f"[ВОЕН] {m['full_name']} • {birth_str}"
+        if len(label) > 60:
+            label = label[:57] + "..."
+        rows.append([
+            InlineKeyboardButton(
+                text=label,
+                callback_data=f"search:m:{m['id']}",
+            )
+        ])
+
+    for r in relatives:
+        birth = r.get("birth_date")
+        birth_str = birth.strftime("%d.%m.%Y") if birth else "—"
+        label = f"[РОДСТ] {r['full_name']} • {birth_str}"
+        if len(label) > 60:
+            label = label[:57] + "..."
+        rows.append([
+            InlineKeyboardButton(
+                text=label,
+                callback_data=f"search:r:{r['id']}",
+            )
+        ])
+
+    rows.append([
+        InlineKeyboardButton(text="« Закрыть", callback_data="search:close")
     ])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)

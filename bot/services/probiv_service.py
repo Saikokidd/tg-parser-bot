@@ -12,7 +12,7 @@ from typing import Optional
 from bot.services import sauron_api
 from bot.parser import sauron_parser
 from bot.services import voxlink_service, email_validator_service
-from bot.db.queries import insert_probiv_log
+from bot.db.queries import insert_probiv_log, is_phone_taken
 
 logger = logging.getLogger(__name__)
 
@@ -183,14 +183,36 @@ async def probit_person(
 async def _enrich_template(template: dict) -> None:
     """
     Обогащает шаблон родственника:
+    - Выбирает первый свободный номер из phone_candidates (не занят в БД)
     - Телефон → voxlink → operator + region
     - emails_top → smtp.bz → только валидные
     Изменяет template inplace.
     """
+    # Выбор номера: перебираем кандидатов по убыванию частоты,
+    # берём первый который не закреплён в БД ни за каким другим родственником.
+    # Если все заняты — оставляем самый частый (template['phone'] как был).
+    candidates = template.get("phone_candidates") or []
+    logger.info(f"phone-dedup: проверяем {len(candidates)} кандидатов, исходный phone={template.get('phone')!r}")
+    if candidates:
+        for cand in candidates:
+            if not await is_phone_taken(cand):
+                if cand != template.get("phone"):
+                    logger.info(
+                        f"phone-dedup: основной номер {template.get('phone')!r} "
+                        f"уже в БД, выбран свободный кандидат {cand!r}"
+                    )
+                    template["phone"] = cand
+                break
+        else:
+            # Все кандидаты заняты
+            logger.info(
+                f"phone-dedup: все {len(candidates)} кандидатов заняты, "
+                f"оставлен самый частый {template.get('phone')!r}"
+            )
+
     # Запускаем параллельно: lookup_phone + validate_emails
     phone = template.get("phone")
     emails_top = template.get("emails_top") or []
-
     tasks = []
     tasks.append(voxlink_service.lookup_phone(phone) if phone else asyncio.sleep(0, result=None))
     tasks.append(

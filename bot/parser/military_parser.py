@@ -15,6 +15,14 @@
 import re
 from datetime import date
 from typing import Optional
+# ────────── Исключения строгого парсера ──────────
+
+class MilitaryStrictError(Exception):
+    """
+    Исключение для нового строгого ввода 'ФИО + ДР'.
+    Сообщение в `args[0]` — готовый текст для менеджера.
+    """
+    pass
 
 
 # ────────── Алиасы ключей шаблона ──────────
@@ -319,3 +327,108 @@ def format_military_record(record: dict) -> str:
         parts.append(f"_Добавил:_ {manager_name}")
 
     return "\n".join(parts)
+
+
+# ────────── СТРОГИЙ ПАРСЕР (новый флоу) ──────────
+
+# Минимальная длина ФИО — 2 слова (фамилия + имя), 3 рекомендовано.
+# Слова разделены одним или несколькими пробелами; допустим дефис (двойные фамилии).
+_FULLNAME_WORD = r"[А-Яа-яЁёA-Za-z][А-Яа-яЁёA-Za-z\-']*"
+_DATE_PART = r"\d{1,2}[./\-\s]\d{1,2}[./\-\s]\d{2,4}"
+
+
+def parse_military_strict(text: str) -> dict:
+    """
+    Строгий парсер для нового упрощённого флоу.
+
+    Принимаем ТОЛЬКО:
+        - 'Фамилия Имя Отчество ДД.ММ.ГГГГ'
+        - С запятой: 'Фамилия Имя Отчество, ДД.ММ.ГГГГ'
+        - С тире: '- Фамилия Имя Отчество ДД.ММ.ГГГГ'
+        - Разделители даты: '.', '/', '-', пробел
+
+    ОТКЛОНЯЕМ всё остальное:
+        - двоеточия (старый шаблон с подписями)
+        - несколько строк
+        - лишние слова после даты (статус/БЧ/позывной)
+
+    Возвращает {'full_name': str, 'birth_date': date, 'status': None, 'extra': {}}
+
+    Бросает MilitaryStrictError с понятным сообщением для менеджера.
+    """
+    if not text or not text.strip():
+        raise MilitaryStrictError(
+            "Пустое сообщение. Отправьте: <b>Фамилия Имя Отчество ДД.ММ.ГГГГ</b>"
+        )
+
+    raw = text.strip()
+
+    # Склеиваем переносы строк в один пробел — менеджеры часто шлют
+    # ФИО и дату с переносом (автоперенос мобильной клавиатуры или Enter).
+    # Пустые строки игнорируем.
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    if not lines:
+        raise MilitaryStrictError(
+            "Пустое сообщение. Отправьте: <b>Фамилия Имя Отчество ДД.ММ.ГГГГ</b>"
+        )
+    line = " ".join(lines)
+
+    # Отклоняем шаблон с подписями (ФИО:, ДР:, Статус: и т.д.)
+    if ':' in line:
+        raise MilitaryStrictError(
+            "Не нужно писать подписи (ФИО:, ДР: и т.п.).\n\n"
+            "Просто: <code>Иванов Иван Иванович 15.03.1985</code>\n\n"
+            "Доп. информацию внесёте на следующем шаге."
+        )
+
+    # Убираем лидирующее тире/буллет/звёздочку
+    line = re.sub(r"^[\-\*•·]\s+", "", line)
+    # Убираем запятую перед датой: "Иванов Иван Иванович, 15.03.1985"
+    line = re.sub(r",\s*", " ", line)
+    # Нормализуем множественные пробелы
+    line = re.sub(r"\s+", " ", line).strip()
+
+    # Ищем дату в конце строки
+    date_match = re.search(rf"\b({_DATE_PART})$", line)
+    if not date_match:
+        raise MilitaryStrictError(
+            "Не нашёл дату рождения в конце сообщения.\n\n"
+            "Формат: <code>Иванов Иван Иванович 15.03.1985</code>"
+        )
+
+    date_str = date_match.group(1)
+    name_part = line[:date_match.start()].strip()
+
+    # Парсим дату
+    birth_date = parse_date(date_str)
+    if birth_date is None:
+        raise MilitaryStrictError(
+            f"Не смог разобрать дату <b>{date_str}</b>.\n\n"
+            "Формат: <code>ДД.ММ.ГГГГ</code> (например 15.03.1985)"
+        )
+
+    # Проверяем ФИО — минимум 2 слова, только буквы/дефис/апостроф
+    name_words = name_part.split()
+    if len(name_words) < 2:
+        raise MilitaryStrictError(
+            "ФИО должно содержать минимум 2 слова (фамилия + имя).\n\n"
+            "Пример: <code>Иванов Иван Иванович 15.03.1985</code>"
+        )
+
+    # Каждое слово должно состоять только из букв/дефиса/апострофа
+    for w in name_words:
+        if not re.fullmatch(_FULLNAME_WORD, w):
+            raise MilitaryStrictError(
+                f"Слово <b>{w}</b> не похоже на часть имени.\n\n"
+                "В ФИО допустимы только буквы (и дефис в двойных фамилиях).\n"
+                "Пример: <code>Иванов Иван Иванович 15.03.1985</code>"
+            )
+
+    full_name = " ".join(name_words)
+
+    return {
+        "full_name": full_name,
+        "birth_date": birth_date,
+        "status": None,
+        "extra": {},
+    }
