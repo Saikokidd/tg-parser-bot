@@ -18,7 +18,11 @@ from aiogram.fsm.context import FSMContext
 from bot.services.probiv_service import (
     probit_person, format_probiv_result, ProbivResult
 )
-from bot.parser.sauron_parser import format_relative_template
+from bot.parser.sauron_parser import (
+    format_relative_template,
+    format_address_relations_page,
+    _dedup_persons_from_blocks,
+)
 from bot.parser.relative_parser import normalize_phone
 from bot.keyboards.menus import (
     probiv_persons_kb,
@@ -128,9 +132,15 @@ async def run_probiv_after_save(
         probiv_origin_military_id=military_id,
         probiv_templates={},  # idx → распарсенный шаблон
     )
-    # Показываем результат (с авто-разбиением длинных сообщений)
-    text = format_probiv_result(result, header="🔍 *Пробив выполнен*")
-    keyboard = probiv_persons_kb(result.address_relations) if result.address_relations else None
+    # Пагинация: собираем плоский список людей один раз и используем
+    # его и для текста, и для клавиатуры. Стартуем со страницы 1.
+    persons_flat = _dedup_persons_from_blocks(result.address_relations)
+
+    text_parts = ["🔍 *Пробив выполнен*", ""]
+    text_parts.append(format_address_relations_page(persons_flat, page=1, page_size=15))
+    text = "\n".join(text_parts)
+
+    keyboard = probiv_persons_kb(persons_flat, page=1, page_size=15) if persons_flat else None
     await safe_edit_or_send(
         status_msg, text,
         parse_mode="Markdown",
@@ -272,6 +282,51 @@ async def probiv_next(callback: CallbackQuery, state: FSMContext, manager: dict 
             parse_mode="Markdown"
         )
 
+
+@router.callback_query(F.data == "probiv:page:noop")
+async def probiv_page_noop(callback: CallbackQuery):
+    """Инфо-кнопка '1/2' — просто закрываем спиннер, ничего не делаем."""
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("probiv:page:"))
+async def probiv_page(callback: CallbackQuery, state: FSMContext):
+    """
+    Переключение страницы возможных связей.
+    Берёт probiv_persons из FSM, формирует новый текст+клавиатуру,
+    редактирует то же сообщение.
+    """
+    await callback.answer()
+    try:
+        page = int(callback.data.split(":")[2])
+    except (IndexError, ValueError):
+        return
+
+    data = await state.get_data()
+    persons = data.get("probiv_persons") or []
+    if not persons:
+        # Список потерян (например бот рестартовал) — гасим клавиатуру
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return
+
+    text_parts = ["🔍 *Пробив выполнен*", ""]
+    text_parts.append(format_address_relations_page(persons, page=page, page_size=15))
+    text = "\n".join(text_parts)
+
+    keyboard = probiv_persons_kb(persons, page=page, page_size=15)
+
+    try:
+        await callback.message.edit_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=keyboard,
+        )
+    except Exception as e:
+        # Например 'message is not modified' если страница та же — пропускаем тихо
+        logger.debug(f"probiv_page edit_text failed: {e}")
 
 @router.callback_query(F.data == "probiv:done")
 async def probiv_done(callback: CallbackQuery, state: FSMContext):

@@ -242,38 +242,67 @@ def add_more_relatives_kb(military_id: int) -> InlineKeyboardMarkup:
 PROBIV_BUTTONS_MAX = 30
 
 
-def probiv_persons_kb(blocks: list[dict]) -> InlineKeyboardMarkup:
+def probiv_persons_kb(persons: list[dict], page: int = 1,
+                       page_size: int = 15) -> InlineKeyboardMarkup:
     """
-    Список людей из 'возможных связей' кнопками.
-    Каждая кнопка → пробить этого человека дальше.
-    Дедуплицируем по (ФИО + ДР) чтобы один человек не дублировался между годами.
-    Ограничиваем количеством PROBIV_BUTTONS_MAX, иначе Telegram отдаст 400 на reply_markup.
+    Постраничная клавиатура людей из 'возможных связей'.
+
+    Принимает уже дедуплицированный плоский список persons (см.
+    sauron_parser._dedup_persons_from_blocks).
+
+    На странице — page_size кнопок, под ними — навигация.
+    Глобальная сквозная нумерация кнопок (16, 17, ...) совпадает с
+    нумерацией в тексте сообщения.
+
+    Навигация (Q2 = вариант c): скрываем неактивные кнопки.
+    Если страница одна — нав-ряда нет вообще.
     """
-    seen = set()
+    if not persons:
+        return InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Готово", callback_data="probiv:done")
+        ]])
+
+    total = len(persons)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = max(1, min(page, total_pages))
+
+    start = (page - 1) * page_size
+    end = min(start + page_size, total)
+
     rows = []
-    idx = 0  # короткий ID для callback_data (Telegram лимит 64 байта)
-    for block in blocks:
-        for p in block["persons"]:
-            if len(rows) >= PROBIV_BUTTONS_MAX:
-                break
-            key = f"{p['full_name']}|{p['birth_date_str']}"
-            if key in seen:
-                continue
-            seen.add(key)
-            label = p["full_name"]
-            if p["birth_date_str"]:
-                label += f" • {p['birth_date_str']}"
-            if len(label) > 60:
-                label = label[:57] + "..."
-            rows.append([
-                InlineKeyboardButton(
-                    text=f"🔍 {label}",
-                    callback_data=f"probiv:next:{idx}"
-                )
-            ])
-            idx += 1
-        if len(rows) >= PROBIV_BUTTONS_MAX:
-            break
+    for i in range(start, end):
+        p = persons[i]
+        label = p["full_name"]
+        if p["birth_date_str"]:
+            label += f" • {p['birth_date_str']}"
+        if len(label) > 55:
+            label = label[:52] + "..."
+        # Добавляем номер для соответствия с текстом
+        rows.append([
+            InlineKeyboardButton(
+                text=f"🔍 {i + 1}. {label}",
+                callback_data=f"probiv:next:{i}",
+            )
+        ])
+
+    # Навигация (только если страниц больше одной)
+    if total_pages > 1:
+        nav_row = []
+        if page > 1:
+            nav_row.append(InlineKeyboardButton(
+                text="◀ Назад",
+                callback_data=f"probiv:page:{page - 1}",
+            ))
+        nav_row.append(InlineKeyboardButton(
+            text=f"{page}/{total_pages}",
+            callback_data="probiv:page:noop",  # инфо-кнопка, не делает ничего
+        ))
+        if page < total_pages:
+            nav_row.append(InlineKeyboardButton(
+                text="Вперёд ▶",
+                callback_data=f"probiv:page:{page + 1}",
+            ))
+        rows.append(nav_row)
 
     rows.append([
         InlineKeyboardButton(text="✅ Готово", callback_data="probiv:done")

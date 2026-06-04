@@ -127,27 +127,29 @@ def extract_address_relations(api_result: dict) -> list[dict]:
     return blocks
 
 
-def format_address_relations(blocks: list[dict]) -> str:
+def _dedup_persons_from_blocks(blocks: list[dict]) -> list[dict]:
     """
-    Компактный вывод "возможных связей".
-    Берёт всех людей со всех блоков, дедуплицирует по (ФИО+ДР).
-    Простой нумерованный список без адресов и источников.
-    ФИО экранируем — иначе Markdown упадёт на спецсимволах.
+    Из блоков (по годам) → плоский список уникальных людей.
+    Дедупликация по (ФИО + ДР). Порядок: первые блоки (свежие года) важнее.
     """
-    if not blocks:
-        return "По этому человеку возможных связей по адресу в ответе API нет."
-
-    # Собираем всех уникальных людей
     seen = set()
     persons = []
-    for block in blocks:
-        for p in block["persons"]:
+    for block in blocks or []:
+        for p in block.get("persons", []):
             key = f"{p['full_name']}|{p['birth_date_str']}"
             if key in seen:
                 continue
             seen.add(key)
             persons.append(p)
+    return persons
 
+
+def format_address_relations(blocks: list[dict]) -> str:
+    """
+    BACK-COMPAT: полный список без пагинации.
+    Используется там, где не нужна постраничная отрисовка.
+    """
+    persons = _dedup_persons_from_blocks(blocks)
     if not persons:
         return "По этому человеку возможных связей по адресу в ответе API нет."
 
@@ -156,6 +158,41 @@ def format_address_relations(blocks: list[dict]) -> str:
         name = _md_escape(p['full_name'])
         birth = f" • {p['birth_date_str']}" if p['birth_date_str'] else ""
         lines.append(f"{i}. {name}{birth}")
+
+    return "\n".join(lines)
+
+
+def format_address_relations_page(persons: list[dict], page: int = 1,
+                                   page_size: int = 15) -> str:
+    """
+    Постраничный вывод "возможных связей" с глобальной сквозной нумерацией.
+    На странице — кандидаты [start..end), нумерация продолжается (16, 17, ...).
+
+    Args:
+        persons: уже дедуплицированный плоский список (см. _dedup_persons_from_blocks)
+        page: номер страницы (1-based, клампится к диапазону)
+        page_size: размер страницы
+
+    Returns:
+        Markdown-текст для отображения.
+    """
+    if not persons:
+        return "По этому человеку возможных связей по адресу в ответе API нет."
+
+    total = len(persons)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = max(1, min(page, total_pages))
+
+    start = (page - 1) * page_size
+    end = min(start + page_size, total)
+
+    header_extra = f" (стр. {page}/{total_pages}, всего {total})" if total_pages > 1 else ""
+    lines = [f"*Возможные связи:*{header_extra}\n"]
+    for i in range(start, end):
+        p = persons[i]
+        name = _md_escape(p['full_name'])
+        birth = f" • {p['birth_date_str']}" if p['birth_date_str'] else ""
+        lines.append(f"{i + 1}. {name}{birth}")
 
     return "\n".join(lines)
 
