@@ -192,7 +192,6 @@ async def _enrich_template(template: dict) -> None:
     # берём первый который не закреплён в БД ни за каким другим родственником.
     # Если все заняты — оставляем самый частый (template['phone'] как был).
     candidates = template.get("phone_candidates") or []
-    logger.info(f"phone-dedup: проверяем {len(candidates)} кандидатов, исходный phone={template.get('phone')!r}")
     if candidates:
         for cand in candidates:
             if not await is_phone_taken(cand):

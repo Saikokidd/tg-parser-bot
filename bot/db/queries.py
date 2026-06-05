@@ -1494,3 +1494,55 @@ async def find_phone_owner_office(phone: str) -> str | None:
         return row["office"] if row else None
 
 
+async def reserve_phone_for_ha(phone: str, manager_id: int) -> int | None:
+    """
+    Зарезервировать номер за офисом ha (заглушка).
+    Создаёт запись в relatives:
+        full_name = 'ha-reserve-<10digits>'
+        phone     = +7<10digits> (нормализованный)
+        office    = 'ha'
+        added_by  = manager_id (виртуальный ha-api)
+        extra     = {'is_ha_reserve': true, 'reserved_at': '<iso>'}
+
+    Возвращает id новой записи или None при ошибке.
+
+    Использует ON CONFLICT не нужен — мы предварительно проверяем что
+    номер свободен через is_phone_taken/find_phone_owner_office.
+    Но если между check и insert кто-то успел вставить тот же номер —
+    мы спокойно создадим вторую запись (дубль). Это редкий edge case,
+    отдельно не страхуем.
+    """
+    if not phone:
+        return None
+    import re as _re_res
+    from datetime import datetime as _dt_res
+    digits = _re_res.sub(r'\D', '', phone)
+    if len(digits) < 10:
+        return None
+    last10 = digits[-10:]
+
+    full_name = f"ha-reserve-{last10}"
+    phone_normalized = f"+7{last10}"
+    extra = {
+        "is_ha_reserve": True,
+        "reserved_at": _dt_res.utcnow().isoformat() + "Z",
+    }
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        try:
+            new_id = await conn.fetchval(
+                """
+                INSERT INTO relatives (full_name, phone, office, added_by, extra)
+                VALUES ($1, $2, 'ha', $3, $4)
+                RETURNING id
+                """,
+                full_name, phone_normalized, manager_id, extra,
+            )
+            return new_id
+        except Exception:
+            import logging as _log_res
+            _log_res.getLogger(__name__).exception(
+                f"reserve_phone_for_ha: failed to insert phone={phone_normalized}"
+            )
+            return None

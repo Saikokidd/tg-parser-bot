@@ -20,12 +20,15 @@ import logging
 import re
 from aiohttp import web
 
-from bot.db.queries import find_phone_owner_office
+from bot.db.queries import find_phone_owner_office, reserve_phone_for_ha
 
 logger = logging.getLogger(__name__)
 
 # Известные офисы, чтобы валидировать agent
 KNOWN_OFFICES = {"pvl", "dp", "ha"}
+# ID виртуального менеджера ha-api в БД (для резервов через API).
+# Создан вручную: см. /tmp/create_ha_api_manager.sql
+HA_API_MANAGER_ID = 98
 
 
 def _load_api_keys() -> dict[str, str]:
@@ -122,12 +125,34 @@ async def check_phone_handler(request: web.Request) -> web.Response:
         return web.json_response({"error": "internal error"}, status=500)
 
     if owner_office is None:
-        result = {"status": "free", "office": None, "is_yours": False}
+        # Свободен → резервируем за ha (если agent=ha).
+        # Если в будущем другие агенты тоже захотят авто-резерв —
+        # добавим аналогично.
+        reserved_id = None
+        if agent == "ha":
+            reserved_id = await reserve_phone_for_ha(phone, HA_API_MANAGER_ID)
+            if reserved_id:
+                logger.info(
+                    f"api: phone reserved for ha agent={agent} ip={ip} "
+                    f"phone=***{digits[-4:]} new_id={reserved_id}"
+                )
+            else:
+                logger.warning(
+                    f"api: phone reserve FAILED for ha ip={ip} "
+                    f"phone=***{digits[-4:]}"
+                )
+        result = {
+            "status": "free",
+            "office": None,
+            "is_yours": False,
+            "reserved": reserved_id is not None,
+        }
     else:
         result = {
             "status": "taken",
             "office": owner_office,
             "is_yours": owner_office == agent,
+            "reserved": False,
         }
 
     # Логируем результат. Phone маскируем — пишем только последние 4 цифры.
