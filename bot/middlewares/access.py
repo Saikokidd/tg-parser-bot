@@ -34,18 +34,6 @@ def get_supervisor_ids_by_office() -> dict[str, set[int]]:
 
 
 # ──────────── Обратная совместимость со старыми env ────────────
-# Чтобы не сломать ничего что было — поддерживаем старые ADMIN_IDS как
-# алиас для SUPER_ADMIN_IDS, и старый SUPERVISOR_IDS как глобальный пульт
-# (видит все офисы; пока существует, помечаем людей как office_supervisor
-# с office=None — они увидят сводную статистику как раньше).
-def _legacy_admin_ids() -> set[int]:
-    return _parse_ids("ADMIN_IDS")
-
-
-def _legacy_supervisor_ids() -> set[int]:
-    return _parse_ids("SUPERVISOR_IDS")
-
-
 class AccessMiddleware(BaseMiddleware):
     """
     Определяет роль и офис пользователя.
@@ -99,8 +87,8 @@ class AccessMiddleware(BaseMiddleware):
         Определить (role, office, manager) для telegram_id.
         Возвращает (None, None, None) если доступа нет.
         """
-        # 1. Супер-админ (включая legacy ADMIN_IDS как алиас)
-        if telegram_id in get_super_admin_ids() or telegram_id in _legacy_admin_ids():
+        # 1. Супер-админ
+        if telegram_id in get_super_admin_ids():
             # Если он одновременно менеджер в БД — подгружаем запись,
             # чтобы он мог использовать функционал менеджера (свой office
             # при пробивах, своя статистика и т.д. — но при этом не теряет
@@ -113,11 +101,8 @@ class AccessMiddleware(BaseMiddleware):
             if telegram_id in ids:
                 return "office_supervisor", office, None
 
-        # 3. Legacy SUPERVISOR_IDS — глобальный пульт без офиса
-        if telegram_id in _legacy_supervisor_ids():
-            return "office_supervisor", None, None
 
-        # 4. Менеджер или офис-админ из БД
+        # 3. Менеджер или офис-админ из БД
         manager_record = await get_manager_by_telegram_id(telegram_id)
         if manager_record:
             role_in_db = manager_record.get("role") or "manager"
@@ -126,5 +111,5 @@ class AccessMiddleware(BaseMiddleware):
                 return "office_admin", office_in_db, manager_record
             return "manager", office_in_db, manager_record
 
-        # 5. Никто
+        # 4. Никто
         return None, None, None
