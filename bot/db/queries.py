@@ -1806,3 +1806,249 @@ async def enable_manager(manager_id: int) -> bool:
             manager_id,
         )
         return result.endswith(" 1")
+
+
+# ════════════════════════════════════════════════════════════════
+#  Relative phones — несколько телефонов на одного родственника
+# ════════════════════════════════════════════════════════════════
+
+async def insert_relative_phones(relative_id: int, phones: list[dict]) -> int:
+    """
+    Batch-insert номеров для родственника.
+    
+    phones — список dict-ов {phone: str, source_frequency: int, is_primary: bool}
+    Возвращает количество фактически вставленных записей.
+    
+    Дубли по (relative_id, phone) тихо игнорируются (ON CONFLICT DO NOTHING).
+    """
+    if not phones:
+        return 0
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # Готовим данные построчно
+        inserted = 0
+        for p in phones:
+            phone = p.get("phone")
+            if not phone:
+                continue
+            result = await conn.execute(
+                """
+                INSERT INTO relative_phones
+                    (relative_id, phone, source_frequency, is_primary)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (relative_id, phone) DO NOTHING
+                """,
+                relative_id,
+                phone,
+                p.get("source_frequency", 1),
+                p.get("is_primary", False),
+            )
+            if result.endswith(" 1"):
+                inserted += 1
+        return inserted
+
+
+async def get_phones_for_relative(relative_id: int) -> list[dict]:
+    """Все номера родственника в порядке: primary first, потом по source_frequency."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, relative_id, phone, operator, operator_checked_at,
+                   hlr_status, hlr_request_id, hlr_checked_at,
+                   is_primary, source_frequency, created_at
+            FROM relative_phones
+            WHERE relative_id = $1
+            ORDER BY is_primary DESC, source_frequency DESC, id ASC
+            """,
+            relative_id,
+        )
+        return [dict(r) for r in rows]
+
+
+async def get_phones_for_relatives(relative_ids: list[int]) -> dict[int, list[dict]]:
+    """
+    Батч-выборка телефонов для списка родственников (для xlsx-выгрузки).
+    Возвращает dict[relative_id, list[phones]].
+    """
+    if not relative_ids:
+        return {}
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, relative_id, phone, operator,
+                   hlr_status, is_primary, source_frequency, created_at
+            FROM relative_phones
+            WHERE relative_id = ANY($1::int[])
+            ORDER BY relative_id, is_primary DESC, source_frequency DESC, id ASC
+            """,
+            relative_ids,
+        )
+        result: dict[int, list[dict]] = {}
+        for r in rows:
+            result.setdefault(r["relative_id"], []).append(dict(r))
+        return result
+
+
+async def phones_pending_voxlink(limit: int = 200) -> list[dict]:
+    """
+    Номера для voxlink-обогащения: operator IS NULL.
+    Возвращает {id, phone, relative_id}.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, phone, relative_id
+            FROM relative_phones
+            WHERE operator IS NULL
+            ORDER BY id ASC
+            LIMIT $1
+            """,
+            limit,
+        )
+        return [dict(r) for r in rows]
+
+
+async def phones_pending_hlr(limit: int = 50) -> list[dict]:
+    """
+    Номера для отправки в HLR: operator определён и не в skip-листе,
+    relatives.office='pvl', hlr_status IS NULL.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT rp.id, rp.phone, rp.operator
+            FROM relative_phones rp
+            JOIN relatives r ON r.id = rp.relative_id
+            WHERE rp.operator IS NOT NULL
+              AND UPPER(rp.operator) NOT IN ('MEGAFON', 'YOTA')
+              AND r.office = 'pvl'
+              AND rp.hlr_status IS NULL
+            ORDER BY rp.id ASC
+            LIMIT $1
+            """,
+            limit,
+        )
+        return [dict(r) for r in rows]
+
+
+async def phones_pending_hlr_poll(limit: int = 200) -> list[dict]:
+    """
+    Номера для опроса статуса HLR: hlr_request_id есть, статус ещё не финальный.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, phone, hlr_request_id
+            FROM relative_phones
+            WHERE hlr_request_id IS NOT NULL
+              AND hlr_status IN ('pending', 'in_work')
+            ORDER BY hlr_checked_at ASC NULLS FIRST, id ASC
+            LIMIT $1
+            """,
+            limit,
+        )
+        return [dict(r) for r in rows]
+
+
+async def update_phone_operator(
+    phone_id: int, operator: str | None
+) -> bool:
+    """
+    Обновить оператор. Если оператор пуст/None → ставим NULL,
+    но при этом помечаем operator_checked_at чтобы воркер
+    не выбирал постоянно одни и те же.
+    
+    Если оператор в skip-листе (MEGAFON, YOTA) → автоматически
+    выставляем hlr_status='skipped_operator'.
+    """
+    pool = await get_pool()
+    skip_ops = {"MEGAFON", "YOTA"}
+    async with pool.acquire() as conn:
+        if operator is None:
+            # Voxlink не определил — оставляем operator=NULL, но фиксируем check time
+            # чтобы можно было ретрайнуть позже
+            await conn.execute(
+                """
+                UPDATE relative_phones
+                SET operator_checked_at = NOW()
+                WHERE id = $1
+                """,
+                phone_id,
+            )
+            return True
+        if operator.upper() in skip_ops:
+            await conn.execute(
+                """
+                UPDATE relative_phones
+                SET operator = $1,
+                    operator_checked_at = NOW(),
+                    hlr_status = 'skipped_operator',
+                    hlr_checked_at = NOW()
+                WHERE id = $2
+                """,
+                operator, phone_id,
+            )
+        else:
+            await conn.execute(
+                """
+                UPDATE relative_phones
+                SET operator = $1, operator_checked_at = NOW()
+                WHERE id = $2
+                """,
+                operator, phone_id,
+            )
+        return True
+
+
+async def update_phone_hlr_request(phone_id: int, request_id: int) -> bool:
+    """После отправки в smsaero — записываем request_id и pending."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE relative_phones
+            SET hlr_request_id = $1,
+                hlr_status = 'pending',
+                hlr_checked_at = NOW()
+            WHERE id = $2
+            """,
+            request_id, phone_id,
+        )
+        return result.endswith(" 1")
+
+
+async def update_phone_hlr_status(
+    phone_id: int, status: str
+) -> bool:
+    """Обновить hlr_status после опроса smsaero."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE relative_phones
+            SET hlr_status = $1, hlr_checked_at = NOW()
+            WHERE id = $2
+            """,
+            status, phone_id,
+        )
+        return result.endswith(" 1")
+
+
+async def mark_phone_hlr_error(phone_id: int) -> bool:
+    """Пометить запись ошибкой (не пытаемся больше отправлять)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE relative_phones
+            SET hlr_status = 'error', hlr_checked_at = NOW()
+            WHERE id = $1
+            """,
+            phone_id,
+        )
+        return result.endswith(" 1")

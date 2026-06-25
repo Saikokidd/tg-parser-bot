@@ -34,6 +34,7 @@ from bot.db.queries import (
     link_military_relative,
     get_military_by_id,
     find_relative_global_dup, insert_relative_v2, get_manager_by_id,   # B1
+    insert_relative_phones, is_phone_taken,                            # multi-phones
 )
 
 logger = logging.getLogger(__name__)
@@ -339,6 +340,72 @@ async def probiv_done(callback: CallbackQuery, state: FSMContext):
 #  Шаг 3: закрепление родственника за военным
 # ════════════════════════════════════════════════════════════
 
+async def _save_relative_phones_from_template(
+    template: dict, relative_id: int, primary_phone: str | None
+) -> int:
+    """
+    Сохранить все номера из Sauron-template в relative_phones.
+    Phone-dedup: пропускаем номера которые уже заняты в БД
+    (не сохраняем чужие, согласно решению F2(d)).
+    
+    primary_phone — нормализованный номер который ушёл в relatives.phone
+                    (помечается is_primary=true).
+    Возвращает количество вставленных записей.
+    """
+    try:
+        candidates = template.get("phone_candidates_with_freq") or []
+        logger.info(
+            f"multi-phones: relative_id={relative_id} got "
+            f"{len(candidates)} candidates, primary={primary_phone}"
+        )
+        if not candidates:
+            return 0
+        
+        from bot.parser.relative_parser import normalize_phone
+        
+        phones_to_insert = []
+        seen_normalized = set()
+        
+        for cand in candidates:
+            raw_phone = cand.get("phone")
+            freq = cand.get("frequency", 1)
+            if not raw_phone:
+                continue
+            normalized = normalize_phone(raw_phone)
+            if not normalized:
+                continue
+            norm_key = normalized.lstrip("+")[-10:]
+            if norm_key in seen_normalized:
+                continue
+            seen_normalized.add(norm_key)
+            is_primary = (normalized == primary_phone)
+            if not is_primary:
+                taken = await is_phone_taken(normalized)
+                if taken:
+                    logger.info(f"multi-phones: skip taken {normalized}")
+                    continue
+            phones_to_insert.append({
+                "phone": normalized,
+                "source_frequency": freq,
+                "is_primary": is_primary,
+            })
+        
+        if not phones_to_insert:
+            logger.info(f"multi-phones: relative_id={relative_id} nothing to insert")
+            return 0
+        inserted = await insert_relative_phones(relative_id, phones_to_insert)
+        logger.info(
+            f"multi-phones: relative_id={relative_id} → "
+            f"inserted={inserted}, primary={primary_phone}"
+        )
+        return inserted
+    except Exception:
+        logger.exception(
+            f"multi-phones: failed for relative_id={relative_id}"
+        )
+        return 0
+
+
 def _build_relative_data_from_template(template: dict) -> dict:
     """
     Преобразовать шаблон из Sauron в формат данных для insert_relative_v2.
@@ -503,7 +570,10 @@ async def attach_do(callback: CallbackQuery, state: FSMContext, manager: dict):
     # Дубля нет — сразу сохраняем + создаём связку
     rel = await insert_relative_v2(relative_data, manager_id)
     await link_military_relative(military_id, rel["id"], manager_id)
-
+    # Сохраняем все номера из Sauron-template в relative_phones
+    await _save_relative_phones_from_template(
+        template, rel["id"], relative_data.get("phone")
+    )
     await callback.message.edit_reply_markup(reply_markup=None)
     await _finalize_attach(callback, state, relative_data["full_name"], reused=False)
 
@@ -522,7 +592,9 @@ async def attach_dup_new(callback: CallbackQuery, state: FSMContext, manager: di
     relative_data = _build_relative_data_from_template(template)
     rel = await insert_relative_v2(relative_data, manager_id)
     await link_military_relative(military_id, rel["id"], manager_id)
-
+    await _save_relative_phones_from_template(
+        template, rel["id"], relative_data.get("phone")
+    )
     await callback.message.edit_text(
         f"➕ Создан новый родственник: *{relative_data['full_name']}*",
         parse_mode="Markdown",

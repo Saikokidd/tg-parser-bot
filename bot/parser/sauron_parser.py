@@ -292,6 +292,33 @@ def _pick_most_common(records: list[dict], field: str) -> Optional[str]:
     return best_orig
 
 
+def _pick_phone_candidates_with_freq(records: list[dict]) -> list[dict]:
+    """
+    Собрать кандидатов на phone с их частотами.
+    Возвращает список dict {'phone': str, 'frequency': int}
+    отсортированный по убыванию частоты.
+    Используется для записи в relative_phones (несколько номеров на родственника).
+    """
+    api_keys = FIELD_API_KEYS["phone"]
+    pairs = []
+    for r in records:
+        for key in api_keys:
+            if key in r and r[key]:
+                original = str(r[key]).strip()
+                norm = _normalize_for_count("phone", original)
+                if norm:
+                    pairs.append((norm, original))
+    if not pairs:
+        return []
+    norm_counter = Counter(p[0] for p in pairs)
+    result = []
+    for best_norm, freq in norm_counter.most_common():
+        originals = [p[1] for p in pairs if p[0] == best_norm]
+        best_orig, _ = Counter(originals).most_common(1)[0]
+        result.append({"phone": best_orig, "frequency": freq})
+    return result
+
+
 def _pick_phone_candidates(records: list[dict]) -> list[str]:
     """
     Собрать кандидатов на phone, отсортированных по убыванию частоты.
@@ -350,10 +377,11 @@ def build_relative_template(api_result: dict) -> dict:
             template[field] = value
     # Дополнительно — собираем топ-3 уникальных email для последующей валидации
     template["emails_top"] = _pick_top_n_unique(records, "email", n=3)
-    # Все кандидаты телефонов по убыванию частоты — для выбора свободного в БД
+    # Все кандидаты телефонов по убыванию частоты — для выбора свободного в БД (legacy)
     template["phone_candidates"] = _pick_phone_candidates(records)
+    # Те же кандидаты, но с частотами — для записи в relative_phones (новая фича)
+    template["phone_candidates_with_freq"] = _pick_phone_candidates_with_freq(records)
     return template
-
 
 def _pick_top_n_unique(records: list[dict], field: str, n: int = 3) -> list[str]:
     """
