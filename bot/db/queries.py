@@ -614,6 +614,14 @@ async def fetch_relatives_for_military_ids(military_ids: list[int]) -> list:
             if isinstance(d.get('linked_military'), str):
                 d['linked_military'] = _json.loads(d['linked_military'])
             result.append(d)
+        
+        # Подмешиваем phones из relative_phones (multi-phones фича)
+        if result:
+            rel_ids = [r["id"] for r in result]
+            phones_map = await get_phones_for_relatives(rel_ids)
+            for r in result:
+                r["phones"] = phones_map.get(r["id"], [])
+        
         return result
 
 
@@ -1924,7 +1932,7 @@ async def phones_pending_hlr(limit: int = 50) -> list[dict]:
             FROM relative_phones rp
             JOIN relatives r ON r.id = rp.relative_id
             WHERE rp.operator IS NOT NULL
-              AND UPPER(rp.operator) NOT IN ('MEGAFON', 'YOTA')
+              AND UPPER(rp.operator) NOT IN ('MEGAFON', 'YOTA', 'МЕГАФОН', 'ЙОТА')
               AND r.office = 'pvl'
               AND rp.hlr_status IS NULL
             ORDER BY rp.id ASC
@@ -1963,11 +1971,15 @@ async def update_phone_operator(
     но при этом помечаем operator_checked_at чтобы воркер
     не выбирал постоянно одни и те же.
     
-    Если оператор в skip-листе (MEGAFON, YOTA) → автоматически
+    Если оператор в skip-листе (Мегафон, Йота) → автоматически
     выставляем hlr_status='skipped_operator'.
+    Skip-лист поддерживает русские и английские варианты названий
+    операторов, потому что voxlink может возвращать разные форматы:
+        'МЕГАФОН' / 'Мегафон' / 'MEGAFON' / 'Megafon'
+        'ЙОТА' / 'Йота' / 'YOTA' / 'Yota'
     """
     pool = await get_pool()
-    skip_ops = {"MEGAFON", "YOTA"}
+    skip_ops = {"MEGAFON", "YOTA", "МЕГАФОН", "ЙОТА"}
     async with pool.acquire() as conn:
         if operator is None:
             # Voxlink не определил — оставляем operator=NULL, но фиксируем check time

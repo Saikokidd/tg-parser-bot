@@ -55,8 +55,7 @@ RELATIVE_COLUMNS = [
     ("ФИО", 30),
     ("ДР", 12),
     ("Адрес", 40),
-    ("Телефон", 16),
-    ("Оператор", 18),
+    ("Телефоны", 40),
     ("Регион", 24),
     ("СНИЛС", 16),
     ("ИНН", 16),
@@ -87,6 +86,53 @@ def _fmt_dt(dt):
     if hasattr(dt, "strftime"):
         return dt.strftime("%d.%m.%Y %H:%M")
     return str(dt)
+
+
+# Маппинг hlr_status → emoji + текст
+HLR_STATUS_LABELS = {
+    "available":         "✅",
+    "unavailable":       "❌ выкл",
+    "not_exists":        "⛔ нет",
+    "in_work":           "⏳",
+    "pending":           "⏳",
+    "skipped_operator":  "⊝",
+    "error":             "⚠️",
+}
+
+
+def _fmt_phones(phones: list[dict], legacy_phone: str | None,
+                 legacy_operator: str | None) -> str:
+    """
+    Формирует многострочную ячейку с телефонами.
+    
+    Формат каждой строки:
+        +79... (МТС) ✅
+        +79... (Билайн) ❌ выкл
+        +79... (Мегафон) ⊝
+    
+    Если phones пуст — fallback на legacy_phone + legacy_operator (одна строка).
+    Primary номер всегда первым.
+    """
+    if phones:
+        lines = []
+        for p in phones:
+            phone = p.get("phone") or ""
+            op = p.get("operator") or "—"
+            status_key = p.get("hlr_status") or ""
+            label = HLR_STATUS_LABELS.get(status_key, "")
+            line = f"{phone} ({op})"
+            if label:
+                line = f"{line} {label}"
+            lines.append(line)
+        return "\n".join(lines)
+    
+    # Fallback на legacy (старые записи у которых ещё не наполнили relative_phones)
+    if legacy_phone:
+        parts = [legacy_phone]
+        if legacy_operator:
+            parts.append(f"({legacy_operator})")
+        return " ".join(parts)
+    return ""
 
 
 def _fmt_extra_custom(extra: dict, std_keys: set) -> str:
@@ -175,13 +221,18 @@ def build_xlsx(military_records: list, relatives: list,
             linked_lines.append(f"{m['full_name']} ({birth or '—'})")
         linked_text = "\n".join(linked_lines) if linked_lines else ""
 
+        # Многострочная ячейка с номерами + статусами HLR
+        phones_text = _fmt_phones(
+            r.get("phones") or [],
+            r.get("phone"),
+            extra.get("operator"),
+        )
         row = [
             r.get("id"),
             r.get("full_name") or "",
             _fmt_date(r.get("birth_date")),
             r.get("address") or "",
-            r.get("phone") or "".lstrip("+"),
-            extra.get("operator") or "",
+            phones_text,
             extra.get("region") or "",
             extra.get("snils") or "",
             extra.get("inn") or "",
@@ -199,7 +250,7 @@ def build_xlsx(military_records: list, relatives: list,
         if linked_in_export:
             first = linked_in_export[0]
             target_row = military_row_by_id[first["id"]]
-            link_cell = ws_rel.cell(row=r_idx, column=12)  # 13 = "Закреплён за"
+            link_cell = ws_rel.cell(row=r_idx, column=11)  # "Закреплён за"
             link_cell.hyperlink = f"#'Военные'!A{target_row}"
             _apply_cell_style(link_cell, is_link=True)
 
