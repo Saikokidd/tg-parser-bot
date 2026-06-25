@@ -10,6 +10,7 @@ from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
 from bot.db.connection import get_pool
+from bot.db.queries import phones_pending_voxlink, update_phone_operator
 from bot.services.voxlink_service import lookup_phone, VoxlinkTransientError
 
 # ──────────── Настройки ────────────
@@ -176,11 +177,12 @@ async def enricher_loop():
     await asyncio.sleep(60)
 
     while True:
+        # Legacy: relatives.phone
         try:
             stats = await run_once()
             if stats.get("candidates", 0) > 0:
                 logger.info(
-                    f"Прогон: candidates={stats['candidates']}, "
+                    f"Прогон legacy: candidates={stats['candidates']}, "
                     f"updated={stats.get('updated', 0)}, "
                     f"not_found={stats.get('not_found_yet', 0)}, "
                     f"marked_skipped={stats.get('marked_skipped', 0)}, "
@@ -191,6 +193,72 @@ async def enricher_loop():
             logger.info("voxlink_enricher остановлен")
             raise
         except Exception as e:
-            logger.exception(f"Ошибка в цикле: {e}")
+            logger.exception(f"Ошибка в цикле legacy: {e}")
+
+        # Multi-phones: relative_phones
+        try:
+            rp_stats = await run_once_relative_phones()
+            if rp_stats.get("rp_candidates", 0) > 0:
+                logger.info(
+                    f"Прогон relative_phones: candidates={rp_stats['rp_candidates']}, "
+                    f"updated={rp_stats.get('rp_updated', 0)}, "
+                    f"not_found={rp_stats.get('rp_not_found', 0)}, "
+                    f"transient={rp_stats.get('rp_transient', 0)}, "
+                    f"errors={rp_stats.get('rp_errors', 0)}"
+                )
+        except asyncio.CancelledError:
+            logger.info("voxlink_enricher остановлен")
+            raise
+        except Exception as e:
+            logger.exception(f"Ошибка в цикле relative_phones: {e}")
 
         await asyncio.sleep(INTERVAL_SECONDS)
+
+
+# ════════════════════════════════════════════════════════════════
+#  Обогащение relative_phones (multi-phones фича)
+# ════════════════════════════════════════════════════════════════
+
+async def _process_one_phone(rp: dict, stats: dict, sem: asyncio.Semaphore):
+    """
+    Обработка одной записи relative_phones под семафором.
+    Логика проще чем для legacy: один номер, один запрос, обновление operator.
+    Voxlink-skipping для multi-phones не делаем — повторим в следующий
+    прогон если не определилось.
+    """
+    async with sem:
+        phone_id = rp["id"]
+        phone = rp["phone"]
+        try:
+            info = await lookup_phone(phone)
+        except VoxlinkTransientError as e:
+            logger.info(f"[rp#{phone_id}] {phone}: transient ({e}), позже")
+            stats["rp_transient"] = stats.get("rp_transient", 0) + 1
+            return
+        except Exception as e:
+            logger.warning(f"[rp#{phone_id}] {phone}: ошибка lookup_phone — {e}")
+            stats["rp_errors"] = stats.get("rp_errors", 0) + 1
+            return
+
+        if info and info.get("operator"):
+            await update_phone_operator(phone_id, info["operator"])
+            stats["rp_updated"] = stats.get("rp_updated", 0) + 1
+        else:
+            # 404 или nothing — пометим operator_checked_at (через None в update)
+            # чтобы не выбирать постоянно тот же. В следующем прогоне попадёт
+            # снова (через ORDER BY id ASC у которого нет фильтра по checked_at —
+            # это ОК для нашего объёма).
+            await update_phone_operator(phone_id, None)
+            stats["rp_not_found"] = stats.get("rp_not_found", 0) + 1
+
+
+async def run_once_relative_phones() -> dict:
+    """Один прогон обогащения relative_phones."""
+    candidates = await phones_pending_voxlink(limit=BATCH_LIMIT)
+    if not candidates:
+        return {"rp_candidates": 0}
+    
+    stats = {"rp_candidates": len(candidates)}
+    sem = asyncio.Semaphore(PARALLEL)
+    await asyncio.gather(*[_process_one_phone(rp, stats, sem) for rp in candidates])
+    return stats

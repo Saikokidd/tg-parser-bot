@@ -17,7 +17,9 @@ from bot.handlers import commands, admin, military, relatives, probiv, stats, le
 from bot.api_server import start_api_server
 from bot.middlewares.access import AccessMiddleware
 from bot.utils.logging_config import setup_logging
-from bot.services.voxlink_enricher import enricher_loop
+from bot.services.voxlink_enricher import enricher_loop as voxlink_enricher_loop
+from bot.services.hlr_enricher import enricher_loop as hlr_enricher_loop
+from bot.services.hlr_poller import poller_loop as hlr_poller_loop
 from bot.api_server import start_api_server
 
 setup_logging()
@@ -54,8 +56,14 @@ async def main():
     logger.info("Database pool initialized")
 
     # Запускаем фоновую задачу обогащения через voxlink (раз в 10 минут)
-    enricher_task = asyncio.create_task(enricher_loop())
+    voxlink_task = asyncio.create_task(voxlink_enricher_loop())
     logger.info("voxlink_enricher started in background")
+
+    hlr_enricher_task = asyncio.create_task(hlr_enricher_loop())
+    logger.info("hlr_enricher started in background")
+
+    hlr_poller_task = asyncio.create_task(hlr_poller_loop())
+    logger.info("hlr_poller started in background")
 
     # HTTP API сервер для внешних агентов (например ha CRM)
     api_runner = None
@@ -74,11 +82,13 @@ async def main():
         if api_runner is not None:
             await api_runner.cleanup()
             logger.info("api: stopped")
-        enricher_task.cancel()
-        try:
-            await enricher_task
-        except asyncio.CancelledError:
-            pass
+        for task in (voxlink_task, hlr_enricher_task, hlr_poller_task):
+            task.cancel()
+        for task in (voxlink_task, hlr_enricher_task, hlr_poller_task):
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         await close_pool()
         await bot.session.close()
         logger.info("Bot stopped")
