@@ -1,5 +1,5 @@
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from bot.utils.menu_guard import is_menu_button_pressed
@@ -7,10 +7,12 @@ from bot.db.queries import (
     list_managers, create_manager, get_manager_by_id,
     add_telegram_id_to_manager, deactivate_manager,
     update_manager_office, move_manager_with_data_to_office,
+    disable_manager, enable_manager,
 )
 from bot.keyboards.menus import (
     admin_menu, managers_menu, back_to_managers, cancel_kb,
     managers_list_kb, confirm_delete_kb, office_choice_kb,
+    manager_pick_kb,
 )
 
 router = Router()
@@ -110,50 +112,131 @@ async def cancel_action(callback: CallbackQuery, state: FSMContext):
 
 # ============== СПИСОК МЕНЕДЖЕРОВ ==============
 
+MGR_LIST_PAGE_SIZE = 10
+
+
+def _render_managers_list_text(
+    managers: list[dict],
+    role: str,
+    office: str | None,
+    page: int,
+    total: int,
+) -> str:
+    """Рендер одной страницы списка менеджеров в Markdown."""
+    header = f"📋 *Список менеджеров* (всего: {total})\n"
+    lines = [header]
+    current_office = None
+    for m in managers:
+        m_office = m.get('office') or '—'
+        if role == 'super_admin' and m_office != current_office:
+            current_office = m_office
+            lines.append(f"\n*━━━ Офис: {m_office} ━━━*")
+
+        if not m.get('is_active'):
+            status = "🔴"
+        elif m.get('is_disabled'):
+            status = "🚫"
+        else:
+            status = "🟢"
+        role_mark = " 👑" if m.get('role') == 'admin' else ""
+        tg_ids = ", ".join(str(tid) for tid in m['telegram_ids']) if m['telegram_ids'] else "—"
+        lines.append(f"{status} *{m['name']}*{role_mark}\n   ID: `{tg_ids}`")
+
+    return "\n\n".join(lines)
+
+
+def _managers_list_nav_kb(page: int, total_pages: int) -> InlineKeyboardMarkup:
+    """Навигация для страничного списка менеджеров."""
+    rows = []
+    if total_pages > 1:
+        nav = []
+        if page > 1:
+            nav.append(InlineKeyboardButton(
+                text="◀ Назад",
+                callback_data=f"mgr:list_page:{page - 1}",
+            ))
+        nav.append(InlineKeyboardButton(
+            text=f"{page}/{total_pages}",
+            callback_data="mgr:list_page:noop",
+        ))
+        if page < total_pages:
+            nav.append(InlineKeyboardButton(
+                text="Вперёд ▶",
+                callback_data=f"mgr:list_page:{page + 1}",
+            ))
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(
+        text="« К меню менеджеров",
+        callback_data="admin:managers",
+    )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _render_managers_list_page(
+    callback: CallbackQuery,
+    role: str,
+    office: str | None,
+    page: int = 1,
+):
+    """Показать страницу списка менеджеров с пагинацией."""
+    office_filter = _office_filter_for(role, office)
+    all_managers = await list_managers(
+        only_active=True,
+        office_filter=office_filter,
+    )
+    total = len(all_managers)
+
+    if total == 0:
+        scope = "по всем офисам" if role == 'super_admin' else f"в офисе {office}"
+        try:
+            await callback.message.edit_text(
+                f"📭 Менеджеров {scope} пока нет.",
+                reply_markup=back_to_managers(),
+            )
+        except Exception:
+            await callback.message.answer(
+                f"📭 Менеджеров {scope} пока нет.",
+                reply_markup=back_to_managers(),
+            )
+        return
+
+    total_pages = max(1, (total + MGR_LIST_PAGE_SIZE - 1) // MGR_LIST_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * MGR_LIST_PAGE_SIZE
+    end = start + MGR_LIST_PAGE_SIZE
+    window = all_managers[start:end]
+
+    text = _render_managers_list_text(window, role, office, page, total)
+    kb = _managers_list_nav_kb(page, total_pages)
+    try:
+        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+    except Exception:
+        await callback.message.answer(text, parse_mode="Markdown", reply_markup=kb)
+
+
 @router.callback_query(F.data == "mgr:list")
 async def show_managers_list(callback: CallbackQuery, role: str = None,
                               office: str = None, is_admin: bool = False):
     if not _is_admin_role(role):
         return
+    await callback.answer()
+    await _render_managers_list_page(callback, role, office, page=1)
 
-    # Фильтр по офису: super_admin видит всех, office_admin — только свой офис
-    office_filter = _office_filter_for(role, office)
-    managers = await list_managers(only_active=False, office_filter=office_filter)
 
-    if not managers:
-        scope = "по всем офисам" if role == 'super_admin' else f"в офисе {office}"
-        await callback.message.edit_text(
-            f"📭 Менеджеров {scope} пока нет.",
-            reply_markup=back_to_managers()
-        )
+@router.callback_query(F.data.startswith("mgr:list_page:"))
+async def show_managers_list_page(callback: CallbackQuery, role: str = None,
+                                    office: str = None):
+    if not _is_admin_role(role):
         return
-
-    header = f"📋 *Список менеджеров* ({len(managers)} шт.)\n"
-
-    lines = [header]
-    current_office = None
-    for m in managers:
-        m_office = m.get('office') or '—'
-        # Группировка по офису для super_admin
-        if role == 'super_admin' and m_office != current_office:
-            current_office = m_office
-            lines.append(f"\n*━━━ Офис: {m_office} ━━━*")
-
-        status = "🟢" if m['is_active'] else "🔴"
-        role_mark = " 👑" if m.get('role') == 'admin' else ""
-        tg_ids = ", ".join(str(tid) for tid in m['telegram_ids']) if m['telegram_ids'] else "—"
-
-        if role == 'super_admin':
-            lines.append(f"{status} *{m['name']}*{role_mark}\n   ID: `{tg_ids}`")
-        else:
-            # office_admin: офис не показываем (он один — свой)
-            lines.append(f"{status} *{m['name']}*{role_mark}\n   ID: `{tg_ids}`")
-
-    await callback.message.edit_text(
-        "\n\n".join(lines),
-        parse_mode="Markdown",
-        reply_markup=back_to_managers()
-    )
+    await callback.answer()
+    action = callback.data.split(":")[2]
+    if action == "noop":
+        return
+    try:
+        page = int(action)
+    except ValueError:
+        return
+    await _render_managers_list_page(callback, role, office, page=page)
 
 
 # ============== ДОБАВЛЕНИЕ МЕНЕДЖЕРА ==============
@@ -526,3 +609,213 @@ async def change_office_do(callback: CallbackQuery, role: str = None,
         reply_markup=back_to_managers()
     )
     await callback.answer()
+
+
+# ============== ОТКЛЮЧИТЬ / ВКЛЮЧИТЬ МЕНЕДЖЕРА ==============
+
+DISABLE_PAGE_SIZE = 10
+
+
+async def _render_disable_list(
+    callback: CallbackQuery,
+    role: str,
+    office: str | None,
+    page: int = 1,
+    edit: bool = True,
+):
+    """
+    Показать список активных НЕотключённых менеджеров для отключения.
+    """
+    office_filter = _office_filter_for(role, office)
+    all_active = await list_managers(
+        only_active=True,
+        office_filter=office_filter,
+        is_disabled_filter=False,
+    )
+    total = len(all_active)
+    if total == 0:
+        scope = "по всем офисам" if role == "super_admin" else f"в офисе {office}"
+        text = f"🚫 *Отключить менеджера*\n\nАктивных менеджеров {scope} нет."
+        try:
+            await callback.message.edit_text(
+                text, parse_mode="Markdown",
+                reply_markup=back_to_managers(),
+            )
+        except Exception:
+            await callback.message.answer(
+                text, parse_mode="Markdown",
+                reply_markup=back_to_managers(),
+            )
+        return
+    
+    total_pages = max(1, (total + DISABLE_PAGE_SIZE - 1) // DISABLE_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * DISABLE_PAGE_SIZE
+    end = start + DISABLE_PAGE_SIZE
+    window = all_active[start:end]
+    
+    text = (
+        f"🚫 *Отключить менеджера*\n\n"
+        f"Выберите кого отключить (всего активных: {total}).\n"
+        f"Менеджер сразу теряет доступ к боту — можно включить обратно."
+    )
+    kb = manager_pick_kb(window, page=page, total_pages=total_pages, action="disable")
+    if edit:
+        try:
+            await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+            return
+        except Exception:
+            pass
+    await callback.message.answer(text, parse_mode="Markdown", reply_markup=kb)
+
+
+async def _render_enable_list(
+    callback: CallbackQuery,
+    role: str,
+    office: str | None,
+    page: int = 1,
+    edit: bool = True,
+):
+    """
+    Показать список активных ОТКЛЮЧЁННЫХ менеджеров для включения.
+    """
+    office_filter = _office_filter_for(role, office)
+    all_disabled = await list_managers(
+        only_active=True,
+        office_filter=office_filter,
+        is_disabled_filter=True,
+    )
+    total = len(all_disabled)
+    if total == 0:
+        scope = "по всем офисам" if role == "super_admin" else f"в офисе {office}"
+        text = f"✅ *Включить менеджера*\n\nОтключённых менеджеров {scope} нет."
+        try:
+            await callback.message.edit_text(
+                text, parse_mode="Markdown",
+                reply_markup=back_to_managers(),
+            )
+        except Exception:
+            await callback.message.answer(
+                text, parse_mode="Markdown",
+                reply_markup=back_to_managers(),
+            )
+        return
+    
+    total_pages = max(1, (total + DISABLE_PAGE_SIZE - 1) // DISABLE_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * DISABLE_PAGE_SIZE
+    end = start + DISABLE_PAGE_SIZE
+    window = all_disabled[start:end]
+    
+    text = (
+        f"✅ *Включить менеджера*\n\n"
+        f"Выберите кого включить обратно (всего отключённых: {total})."
+    )
+    kb = manager_pick_kb(window, page=page, total_pages=total_pages, action="enable")
+    if edit:
+        try:
+            await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+            return
+        except Exception:
+            pass
+    await callback.message.answer(text, parse_mode="Markdown", reply_markup=kb)
+
+
+@router.callback_query(F.data == "mgr:disable_list")
+async def disable_list(callback: CallbackQuery, role: str = None, office: str = None):
+    if not _is_admin_role(role):
+        return
+    await callback.answer()
+    await _render_disable_list(callback, role, office, page=1)
+
+
+@router.callback_query(F.data.startswith("mgr:disable_page:"))
+async def disable_page(callback: CallbackQuery, role: str = None, office: str = None):
+    if not _is_admin_role(role):
+        return
+    await callback.answer()
+    action = callback.data.split(":")[2]
+    if action == "noop":
+        return
+    try:
+        page = int(action)
+    except ValueError:
+        return
+    await _render_disable_list(callback, role, office, page=page)
+
+
+@router.callback_query(F.data.startswith("mgr:disable_pick:"))
+async def disable_pick(callback: CallbackQuery, role: str = None, office: str = None):
+    if not _is_admin_role(role):
+        return
+    await callback.answer()
+    try:
+        manager_id = int(callback.data.split(":")[2])
+    except (IndexError, ValueError):
+        return
+    
+    # Проверяем доступ — office_admin может отключать только своего офиса
+    m = await get_manager_by_id(manager_id)
+    if not m or not m.get("is_active"):
+        await callback.message.answer("⚠️ Менеджер недоступен.")
+        return
+    if role == "office_admin" and m.get("office") != office:
+        await callback.message.answer("⚠️ Менеджер из другого офиса.")
+        return
+    
+    ok = await disable_manager(manager_id)
+    if not ok:
+        await callback.message.answer("⚠️ Не удалось отключить менеджера.")
+        return
+    
+    # Перерисовываем список (отключённый исчез)
+    await _render_disable_list(callback, role, office, page=1)
+
+
+@router.callback_query(F.data == "mgr:enable_list")
+async def enable_list(callback: CallbackQuery, role: str = None, office: str = None):
+    if not _is_admin_role(role):
+        return
+    await callback.answer()
+    await _render_enable_list(callback, role, office, page=1)
+
+
+@router.callback_query(F.data.startswith("mgr:enable_page:"))
+async def enable_page(callback: CallbackQuery, role: str = None, office: str = None):
+    if not _is_admin_role(role):
+        return
+    await callback.answer()
+    action = callback.data.split(":")[2]
+    if action == "noop":
+        return
+    try:
+        page = int(action)
+    except ValueError:
+        return
+    await _render_enable_list(callback, role, office, page=page)
+
+
+@router.callback_query(F.data.startswith("mgr:enable_pick:"))
+async def enable_pick(callback: CallbackQuery, role: str = None, office: str = None):
+    if not _is_admin_role(role):
+        return
+    await callback.answer()
+    try:
+        manager_id = int(callback.data.split(":")[2])
+    except (IndexError, ValueError):
+        return
+    
+    m = await get_manager_by_id(manager_id)
+    if not m or not m.get("is_active"):
+        await callback.message.answer("⚠️ Менеджер недоступен.")
+        return
+    if role == "office_admin" and m.get("office") != office:
+        await callback.message.answer("⚠️ Менеджер из другого офиса.")
+        return
+    
+    ok = await enable_manager(manager_id)
+    if not ok:
+        await callback.message.answer("⚠️ Не удалось включить менеджера.")
+        return
+    
+    await _render_enable_list(callback, role, office, page=1)

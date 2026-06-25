@@ -56,11 +56,13 @@ class AccessMiddleware(BaseMiddleware):
         if not user:
             return await handler(event, data)
 
-        role, office, manager = await self._resolve(user.id)
+        role, office, manager = await self._resolve(user.id, event_data=data)
 
         # Доступа нет — отказ
         if role is None:
-            text = "У вас нет доступа к боту."
+            # data["_access_reason"] заполняется в _resolve если причина
+            # отказа специфическая (например is_disabled)
+            text = data.pop("_access_reason", "У вас нет доступа к боту.")
             if isinstance(event, Message):
                 await event.answer(text)
             elif isinstance(event, CallbackQuery):
@@ -81,30 +83,35 @@ class AccessMiddleware(BaseMiddleware):
         return await handler(event, data)
 
     async def _resolve(
-        self, telegram_id: int
+        self, telegram_id: int, event_data: dict = None,
     ) -> tuple[str | None, str | None, dict | None]:
         """
         Определить (role, office, manager) для telegram_id.
         Возвращает (None, None, None) если доступа нет.
+
+        event_data — словарь data из middleware, в него можно записать
+        '_access_reason' если причина отказа специфическая.
         """
-        # 1. Супер-админ
+        # 1. Супер-админ — НЕ блокируется флагом is_disabled
+        #    Это последний рубеж от случайного бана-самого-себя.
         if telegram_id in get_super_admin_ids():
-            # Если он одновременно менеджер в БД — подгружаем запись,
-            # чтобы он мог использовать функционал менеджера (свой office
-            # при пробивах, своя статистика и т.д. — но при этом не теряет
-            # супер-админских прав).
             manager_record = await get_manager_by_telegram_id(telegram_id)
             return "super_admin", None, manager_record
 
-        # 2. Пульт офиса (по новому SUPERVISOR_<OFFICE>_IDS)
+        # 2. Пульт офиса
         for office, ids in get_supervisor_ids_by_office().items():
             if telegram_id in ids:
                 return "office_supervisor", office, None
 
-
         # 3. Менеджер или офис-админ из БД
         manager_record = await get_manager_by_telegram_id(telegram_id)
         if manager_record:
+            # Проверяем флаг is_disabled — временное отключение
+            if manager_record.get("is_disabled"):
+                if event_data is not None:
+                    event_data["_access_reason"] = "Доступ к боту отключён."
+                return None, None, None
+
             role_in_db = manager_record.get("role") or "manager"
             office_in_db = manager_record.get("office")
             if role_in_db == "admin":
