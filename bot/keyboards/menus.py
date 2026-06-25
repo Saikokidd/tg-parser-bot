@@ -22,6 +22,7 @@ def main_menu(is_admin: bool = False, is_supervisor: bool = False) -> ReplyKeybo
             [KeyboardButton(text="Список лидов")],
             [KeyboardButton(text="📊 Статистика")],
             [KeyboardButton(text="📤 Выгрузить лидов")],
+            [KeyboardButton(text="📌 Мои источники")],
         ]
         if is_admin:
             rows.append([KeyboardButton(text="⚙️ Управление ботом")])
@@ -62,6 +63,8 @@ def managers_menu(is_super_admin: bool = False) -> InlineKeyboardMarkup:
                                           callback_data="mgr:change_office")])
     rows.extend([
         [InlineKeyboardButton(text="📋 Список менеджеров", callback_data="mgr:list")],
+        [InlineKeyboardButton(text="🚫 Отключить менеджера", callback_data="mgr:disable_list")],
+        [InlineKeyboardButton(text="✅ Включить менеджера", callback_data="mgr:enable_list")],
         [InlineKeyboardButton(text="❌ Удалить менеджера", callback_data="mgr:delete")],
         [InlineKeyboardButton(text="« Назад", callback_data="admin:back")],
     ])
@@ -670,4 +673,217 @@ def search_results_kb(military: list[dict], relatives: list[dict]) -> InlineKeyb
         InlineKeyboardButton(text="« Закрыть", callback_data="search:close")
     ])
 
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+    # ════════════════════════════════════════════════════════════════
+#  Sources — реестр источников лидов
+# ════════════════════════════════════════════════════════════════
+
+def source_pick_kb(
+    sources: list[dict],
+    page: int = 1,
+    total_pages: int = 1,
+) -> InlineKeyboardMarkup:
+    """
+    Выбор источника при создании лида (вместо текстового ввода).
+    
+    Кнопки:
+        📌 <name>  ← по 1 на строку
+        ◀ N/M ▶    ← если total_pages > 1, скрытие неактивных
+        ✏️ Свой вариант
+        ❌ Без источника
+    
+    callback_data:
+        src:pick:<id>     — выбран источник из списка
+        src:page:<N>      — переключить страницу
+        src:page:noop     — инфо-кнопка N/M
+        src:custom        — открыть ввод своего варианта
+        src:none          — без источника
+    """
+    rows = []
+
+    for s in sources:
+        name = s["name"]
+        label = f"📌 {name}"
+        if len(label) > 55:
+            label = label[:52] + "..."
+        rows.append([
+            InlineKeyboardButton(
+                text=label,
+                callback_data=f"src:pick:{s['id']}",
+            )
+        ])
+
+    # Навигация (только если страниц больше одной)
+    if total_pages > 1:
+        nav_row = []
+        if page > 1:
+            nav_row.append(InlineKeyboardButton(
+                text="◀ Назад",
+                callback_data=f"src:page:{page - 1}",
+            ))
+        nav_row.append(InlineKeyboardButton(
+            text=f"{page}/{total_pages}",
+            callback_data="src:page:noop",
+        ))
+        if page < total_pages:
+            nav_row.append(InlineKeyboardButton(
+                text="Вперёд ▶",
+                callback_data=f"src:page:{page + 1}",
+            ))
+        rows.append(nav_row)
+
+    rows.append([
+        InlineKeyboardButton(text="✏️ Свой вариант", callback_data="src:custom")
+    ])
+    rows.append([
+        InlineKeyboardButton(text="❌ Без источника", callback_data="src:none")
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def my_sources_list_kb(
+    sources: list[dict],
+    page: int = 1,
+    total_pages: int = 1,
+) -> InlineKeyboardMarkup:
+    """
+    Меню "📌 Мои источники" — список с пагинацией.
+    Клик на источник → карточка.
+
+    callback_data:
+        mysrc:open:<id>
+        mysrc:page:<N>
+        mysrc:page:noop
+        mysrc:close
+    """
+    rows = []
+
+    for s in sources:
+        name = s["name"]
+        label = f"📌 {name}"
+        if len(label) > 55:
+            label = label[:52] + "..."
+        rows.append([
+            InlineKeyboardButton(
+                text=label,
+                callback_data=f"mysrc:open:{s['id']}",
+            )
+        ])
+
+    if total_pages > 1:
+        nav_row = []
+        if page > 1:
+            nav_row.append(InlineKeyboardButton(
+                text="◀ Назад",
+                callback_data=f"mysrc:page:{page - 1}",
+            ))
+        nav_row.append(InlineKeyboardButton(
+            text=f"{page}/{total_pages}",
+            callback_data="mysrc:page:noop",
+        ))
+        if page < total_pages:
+            nav_row.append(InlineKeyboardButton(
+                text="Вперёд ▶",
+                callback_data=f"mysrc:page:{page + 1}",
+            ))
+        rows.append(nav_row)
+
+    rows.append([
+        InlineKeyboardButton(text="« Закрыть", callback_data="mysrc:close")
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def source_card_kb(source_id: int) -> InlineKeyboardMarkup:
+    """
+    Карточка источника в "Мои источники".
+    Кнопки: переименовать / удалить / назад.
+
+    callback_data:
+        mysrc:rename:<id>
+        mysrc:delete:<id>
+        mysrc:back
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Переименовать",
+                              callback_data=f"mysrc:rename:{source_id}")],
+        [InlineKeyboardButton(text="❌ Удалить",
+                              callback_data=f"mysrc:delete:{source_id}")],
+        [InlineKeyboardButton(text="« Назад к списку",
+                              callback_data="mysrc:back")],
+    ])
+
+
+def confirm_delete_source_kb(source_id: int) -> InlineKeyboardMarkup:
+    """
+    Подтверждение удаления источника.
+    Показывается с текстом сколько лидов на нём.
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, удалить",
+                              callback_data=f"mysrc:delete_confirm:{source_id}")],
+        [InlineKeyboardButton(text="❌ Отмена",
+                              callback_data=f"mysrc:open:{source_id}")],
+    ])
+
+
+def manager_pick_kb(
+    managers: list[dict],
+    page: int,
+    total_pages: int,
+    action: str,
+) -> InlineKeyboardMarkup:
+    """
+    Список менеджеров с кнопками для одиночного действия.
+    
+    managers — окно по странице (10 шт max)
+    action — 'disable' или 'enable' (используется в callback_data)
+    callback_data:
+        mgr:<action>_pick:<id>      — клик на менеджера
+        mgr:<action>_page:<N>       — переключить страницу
+        mgr:<action>_page:noop      — инфо-кнопка N/M
+        admin:managers              — назад
+    """
+    rows = []
+    for m in managers:
+        office = m.get("office") or "—"
+        role_mark = " 👑" if m.get("role") == "admin" else ""
+        name = m["name"]
+        label = f"[{office}] {name}{role_mark}"
+        if len(label) > 55:
+            label = label[:52] + "..."
+        rows.append([
+            InlineKeyboardButton(
+                text=label,
+                callback_data=f"mgr:{action}_pick:{m['id']}",
+            )
+        ])
+    
+    if total_pages > 1:
+        nav_row = []
+        if page > 1:
+            nav_row.append(InlineKeyboardButton(
+                text="◀ Назад",
+                callback_data=f"mgr:{action}_page:{page - 1}",
+            ))
+        nav_row.append(InlineKeyboardButton(
+            text=f"{page}/{total_pages}",
+            callback_data=f"mgr:{action}_page:noop",
+        ))
+        if page < total_pages:
+            nav_row.append(InlineKeyboardButton(
+                text="Вперёд ▶",
+                callback_data=f"mgr:{action}_page:{page + 1}",
+            ))
+        rows.append(nav_row)
+    
+    rows.append([InlineKeyboardButton(
+        text="« К меню менеджеров",
+        callback_data="admin:managers",
+    )])
+    
     return InlineKeyboardMarkup(inline_keyboard=rows)

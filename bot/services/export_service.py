@@ -217,7 +217,7 @@ def build_xlsx(military_records: list, relatives: list,
             status_label(m.get("status")),
             extra.get("unit") or "",
             extra.get("callsign") or "",
-            extra.get("source") or "",
+            m.get("source_name") or extra.get("source") or "",
             extra.get("note") or "",
         ]
 

@@ -21,10 +21,17 @@ from bot.parser.military_parser import (
 )
 from bot.db.queries import (
     list_military_by_manager,
-    find_military_global_dup, insert_military_v2,         # этап B1: глобальный дубль + office при создании
-    update_military_extra_field,                          # для записи доп.инфы и источника в extra
+    find_military_global_dup, insert_military_v2,
+    update_military_extra_field,
+    # sources
+    list_sources_by_manager, count_sources_by_manager,
+    find_source_by_normalized_name, create_source,
+    get_source_by_id, attach_source_to_military,
 )
-from bot.keyboards.menus import confirm_military_with_dups_kb
+from bot.keyboards.menus import (
+    confirm_military_with_dups_kb,
+    source_pick_kb,
+)
 
 router = Router()
 
@@ -34,15 +41,17 @@ router = Router()
 class MilitaryStates(StatesGroup):
     waiting_template = State()
     waiting_dup_decision = State()
-    waiting_extra_info = State()  # доп. инфа (БЧ/позывной/статус — свободный текст), идёт перед источником
-    waiting_source = State()      # ввод источника, после доп.инфы, перед пробивом
+    waiting_extra_info = State()         # доп. инфа (БЧ/позывной/статус — свободный текст)
+    waiting_source_choice = State()      # выбор источника кнопками
+    waiting_source_text = State()        # ввод текста для нового источника (после "Свой вариант")
 
 
 # ──────────── /cancel ────────────
 
 @router.message(Command("cancel"), MilitaryStates.waiting_template)
 @router.message(Command("cancel"), MilitaryStates.waiting_extra_info)
-@router.message(Command("cancel"), MilitaryStates.waiting_source)
+@router.message(Command("cancel"), MilitaryStates.waiting_source_choice)
+@router.message(Command("cancel"), MilitaryStates.waiting_source_text)
 @router.message(Command("cancel"), MilitaryStates.waiting_dup_decision)
 async def cancel_military_flow(message: Message, state: FSMContext):
     await state.clear()
@@ -235,39 +244,211 @@ async def receive_extra_info(message: Message, state: FSMContext):
 
 
 async def _ask_for_source(target: Message, state: FSMContext):
-    """Переводит флоу в state waiting_source и спрашивает откуда данные."""
-    await state.set_state(MilitaryStates.waiting_source)
-    await target.answer(
+    """
+    Переводит флоу в выбор источника. Если у менеджера есть свои
+    источники — показываем кнопки. Если нет — сразу просим ввести
+    свой вариант (или /skip).
+    """
+    manager_id = state_data.get("saved_manager_id") if (
+        state_data := await state.get_data()
+    ) else None
+
+    if not manager_id:
+        # Нет manager_id (это супер-админ или странный кейс) — без источника
+        await _continue_to_probit(target, state)
+        return
+
+    total = await count_sources_by_manager(manager_id)
+    if total == 0:
+        # У менеджера нет ни одного источника — сразу текстовый ввод
+        await state.set_state(MilitaryStates.waiting_source_text)
+        await target.answer(
+            "📌 *Откуда взяли данные?*\n\n"
+            "У вас пока нет сохранённых источников.\n"
+            "Введите название канала, ссылку или любой текст — он сохранится в ваш список.\n"
+            "Без источника — отправьте /skip",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Есть источники — показываем кнопочный выбор
+    PAGE_SIZE = 5
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    sources = await list_sources_by_manager(manager_id, page=1, page_size=PAGE_SIZE)
+
+    await state.set_state(MilitaryStates.waiting_source_choice)
+    await state.update_data(source_page_size=PAGE_SIZE)
+
+    text = (
         "📌 *Откуда взяли данные?*\n\n"
-        "Введите источник — ссылка на чат, название группы, или любой текст.\n"
-        "Если не нужно — отправьте /skip",
+        f"Выберите один из ваших источников или добавьте новый "
+        f"(всего: {total})."
+    )
+    await target.answer(
+        text,
+        parse_mode="Markdown",
+        reply_markup=source_pick_kb(sources, page=1, total_pages=total_pages),
+    )
+
+
+# ──── waiting_source_choice — кнопочный выбор ────
+
+@router.callback_query(
+    F.data.startswith("src:page:"),
+    MilitaryStates.waiting_source_choice,
+)
+async def source_choice_page(callback: CallbackQuery, state: FSMContext):
+    """Переключение страницы списка источников."""
+    await callback.answer()
+    try:
+        action = callback.data.split(":")[2]
+    except IndexError:
+        return
+    if action == "noop":
+        return
+
+    try:
+        page = int(action)
+    except ValueError:
+        return
+
+    data = await state.get_data()
+    manager_id = data.get("saved_manager_id")
+    page_size = data.get("source_page_size", 5)
+    if not manager_id:
+        return
+
+    total = await count_sources_by_manager(manager_id)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = max(1, min(page, total_pages))
+    sources = await list_sources_by_manager(manager_id, page=page, page_size=page_size)
+
+    try:
+        await callback.message.edit_reply_markup(
+            reply_markup=source_pick_kb(sources, page=page, total_pages=total_pages)
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(
+    F.data.startswith("src:pick:"),
+    MilitaryStates.waiting_source_choice,
+)
+async def source_choice_pick(callback: CallbackQuery, state: FSMContext):
+    """Менеджер выбрал источник из своего списка."""
+    await callback.answer()
+    try:
+        source_id = int(callback.data.split(":")[2])
+    except (IndexError, ValueError):
+        return
+
+    data = await state.get_data()
+    manager_id = data.get("saved_manager_id")
+    military_id = data.get("saved_military_id")
+    if not (manager_id and military_id):
+        return
+
+    src = await get_source_by_id(source_id)
+    if not src or not src["is_active"] or src["owner_manager_id"] != manager_id:
+        # Дополнительная защита — источник чужой или удалён
+        await callback.message.answer("⚠️ Источник недоступен. Выберите другой или /cancel.")
+        return
+
+    await attach_source_to_military(military_id, source_id)
+    await callback.message.edit_text(
+        f"📌 Источник: {src['name']}",
+    )
+    await _continue_to_probit(callback.message, state)
+
+
+@router.callback_query(
+    F.data == "src:custom",
+    MilitaryStates.waiting_source_choice,
+)
+async def source_choice_custom(callback: CallbackQuery, state: FSMContext):
+    """Менеджер хочет ввести свой вариант — переходим в текстовый ввод."""
+    await callback.answer()
+    await state.set_state(MilitaryStates.waiting_source_text)
+    await callback.message.edit_text(
+        "📌 *Свой источник*\n\n"
+        "Введите название канала, ссылку или любой текст.\n"
+        "Источник сохранится в ваш список.\n"
+        "Отмена — /cancel или /skip без источника",
         parse_mode="Markdown",
     )
 
 
-@router.message(Command("skip"), MilitaryStates.waiting_source)
-async def skip_source(message: Message, state: FSMContext):
+@router.callback_query(
+    F.data == "src:none",
+    MilitaryStates.waiting_source_choice,
+)
+async def source_choice_none(callback: CallbackQuery, state: FSMContext):
+    """Без источника — сразу к пробиву."""
+    await callback.answer()
+    try:
+        await callback.message.edit_text("📌 Без источника.")
+    except Exception:
+        pass
+    await _continue_to_probit(callback.message, state)
+
+
+# ──── waiting_source_text — ручной ввод ────
+
+@router.message(Command("skip"), MilitaryStates.waiting_source_text)
+async def skip_source_text(message: Message, state: FSMContext):
     """Менеджер пропустил ввод источника — сразу к пробиву"""
     await _continue_to_probit(message, state)
 
 
-@router.message(MilitaryStates.waiting_source)
-async def receive_source(message: Message, state: FSMContext):
+@router.message(MilitaryStates.waiting_source_text)
+async def receive_source_text(message: Message, state: FSMContext):
     if await is_menu_button_pressed(message, state):
         return
-    """Менеджер ввёл источник — сохраняем в extra.source и идём в пробив"""
-    source_text = message.text.strip()
+
+    source_text = (message.text or "").strip()
     if not source_text:
         await message.answer("⚠️ Пустой текст. Введите источник или /skip")
         return
 
     data = await state.get_data()
-    military_id = data["saved_military_id"]
+    manager_id = data.get("saved_manager_id")
+    military_id = data.get("saved_military_id")
+    manager_office = data.get("saved_office")
+    if not (manager_id and military_id):
+        await message.answer("⚠️ Состояние утеряно. /cancel и заново.")
+        return
 
-    # Сохраняем источник в extra
-    await update_military_extra_field(military_id, "source", source_text)
+    # Проверяем что нормализованное имя ещё не занято кем-то ещё
+    existing = await find_source_by_normalized_name(source_text)
+    if existing:
+        if existing["owner_manager_id"] == manager_id:
+            # Это твой собственный источник — просто прикрепляем без нового INSERT
+            await attach_source_to_military(military_id, existing["id"])
+            await message.answer(f"📌 Источник: {existing['name']}")
+            await _continue_to_probit(message, state)
+            return
+        # Чужой источник — жёсткий отказ
+        owner_office = existing.get("office") or "—"
+        await message.answer(
+            f"❌ Источник <b>{source_text}</b> уже занят менеджером "
+            f"из офиса <b>{owner_office}</b>.\n\n"
+            f"Введите другой источник или /skip без источника.",
+            parse_mode="HTML",
+        )
+        return
 
-    # Без markdown — source может содержать спецсимволы (_*[] и т.д.) из URL
+    # Создаём новый источник за менеджером
+    new_id = await create_source(source_text, manager_id, manager_office)
+    if not new_id:
+        # Очень маловероятно — race condition или ошибка БД
+        await message.answer(
+            "⚠️ Не удалось сохранить источник. Попробуйте ещё раз или /skip."
+        )
+        return
+
+    await attach_source_to_military(military_id, new_id)
+    # Источник может содержать спецсимволы — без markdown
     await message.answer(f"📌 Источник сохранён: {source_text}")
     await _continue_to_probit(message, state)
 

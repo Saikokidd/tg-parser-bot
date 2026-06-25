@@ -67,12 +67,18 @@ async def add_telegram_id_to_manager(manager_id: int, telegram_id: int, username
             return False
 
 
-async def list_managers(only_active: bool = True, office_filter: str | None = None) -> list:
+async def list_managers(
+    only_active: bool = True,
+    office_filter: str | None = None,
+    is_disabled_filter: bool | None = None,
+) -> list:
     """
     Список менеджеров с их telegram_id и офисом.
-
-    office_filter: если задан ('pvl' / 'dp' / 'ha') — вернёт только менеджеров
-                   этого офиса. None — вернёт всех (для super_admin).
+    
+    only_active        — True (default) показывает только is_active=TRUE
+    office_filter      — 'pvl' / 'dp' / 'ha' / None для всех
+    is_disabled_filter — None (default) — без фильтра; True — только отключённые;
+                         False — только не отключённые
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -83,11 +89,14 @@ async def list_managers(only_active: bool = True, office_filter: str | None = No
         if office_filter is not None:
             params.append(office_filter)
             conditions.append(f"m.office = ${len(params)}")
+        if is_disabled_filter is not None:
+            params.append(is_disabled_filter)
+            conditions.append(f"m.is_disabled = ${len(params)}")
         where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-
         rows = await conn.fetch(
             f"""
-            SELECT m.id, m.name, m.office, m.role, m.is_active, m.created_at,
+            SELECT m.id, m.name, m.office, m.role,
+                   m.is_active, m.is_disabled, m.created_at,
                    COALESCE(
                        array_agg(mti.telegram_id) FILTER (WHERE mti.telegram_id IS NOT NULL),
                        '{{}}'::bigint[]
@@ -541,9 +550,11 @@ async def fetch_military_for_export(manager_id: int = None, limit: int = None) -
             params.append(manager_id)
 
         sql = f"""
-            SELECT pm.*, m.name AS manager_name
+            SELECT pm.*, m.name AS manager_name,
+                   s.name AS source_name
             FROM persons_military pm
             LEFT JOIN managers m ON pm.added_by = m.id
+            LEFT JOIN sources s ON s.id = pm.source_id
             WHERE {' AND '.join(where)}
             ORDER BY pm.created_at ASC
         """
@@ -1362,7 +1373,7 @@ async def search_leads(query: str, role: str, office: str | None,
             # regexp_replace убирает нецифры из r.phone, потом сравниваем хвост
             rel_params.append(parsed['phone_last10'])
             rel_where.append(
-                f"RIGHT(regexp_replace(COALESCE(r.phone,''), '\\D', '', 'g'), 10) = ${len(rel_params)}"
+                f"phone_last10(r.phone::text) = ${len(rel_params)}"
             )
 
         # Доступ
@@ -1453,7 +1464,7 @@ async def is_phone_taken(phone: str) -> bool:
         row = await conn.fetchrow(
             """
             SELECT 1 FROM relatives
-            WHERE RIGHT(regexp_replace(COALESCE(phone, ''), '\\D', '', 'g'), 10) = $1
+            WHERE phone_last10(phone::text) = $1
             LIMIT 1
             """,
             last10,
@@ -1485,8 +1496,7 @@ async def find_phone_owner_office(phone: str) -> str | None:
         row = await conn.fetchrow(
             """
             SELECT office FROM relatives
-            WHERE RIGHT(regexp_replace(COALESCE(phone, ''), '\\D', '', 'g'), 10) = $1
-            ORDER BY id ASC
+            WHERE phone_last10(phone::text) = $1
             LIMIT 1
             """,
             last10,
@@ -1546,3 +1556,253 @@ async def reserve_phone_for_ha(phone: str, manager_id: int) -> int | None:
                 f"reserve_phone_for_ha: failed to insert phone={phone_normalized}"
             )
             return None
+
+
+
+# ════════════════════════════════════════════════════════════════
+#  Sources — реестр источников лидов
+# ════════════════════════════════════════════════════════════════
+
+def _normalize_source_name(name: str) -> str:
+    """
+    Нормализация имени источника для проверки уникальности.
+    lower + trim + squeeze whitespace.
+    "Канал X" и "канал  x" → один источник.
+    """
+    import re as _re_src
+    if not name:
+        return ""
+    return _re_src.sub(r"\s+", " ", name.strip().lower())
+
+
+async def find_source_by_normalized_name(name: str) -> Optional[dict]:
+    """
+    Глобальный поиск активного источника по нормализованному имени.
+    Возвращает запись с полями id, name, owner_manager_id, office,
+    плюс имя владельца (через JOIN) — manager_name.
+    Если не найден или soft-deleted → None.
+    """
+    normalized = _normalize_source_name(name)
+    if not normalized:
+        return None
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT s.id, s.name, s.normalized_name, s.owner_manager_id,
+                   s.office, s.is_active, s.created_at,
+                   m.name AS manager_name
+            FROM sources s
+            JOIN managers m ON m.id = s.owner_manager_id
+            WHERE s.normalized_name = $1 AND s.is_active = TRUE
+            """,
+            normalized,
+        )
+        return dict(row) if row else None
+
+
+async def create_source(name: str, manager_id: int, office: str | None) -> int | None:
+    """
+    Создать новый источник за менеджером.
+    Если такой нормализованный name уже существует у кого-то — None.
+    Возвращает id нового источника.
+    """
+    normalized = _normalize_source_name(name)
+    if not normalized:
+        return None
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        try:
+            new_id = await conn.fetchval(
+                """
+                INSERT INTO sources (name, normalized_name, owner_manager_id, office)
+                VALUES ($1, $2, $3, $4)
+                RETURNING id
+                """,
+                name.strip(), normalized, manager_id, office,
+            )
+            return new_id
+        except asyncpg.exceptions.UniqueViolationError:
+            # Источник уже занят — не пишем traceback, это штатный кейс
+            return None
+        except Exception:
+            import logging as _log_src
+            _log_src.getLogger(__name__).exception(
+                f"create_source failed: name={name!r}, mgr={manager_id}"
+            )
+            return None
+
+async def get_source_by_id(source_id: int) -> Optional[dict]:
+    """Получить источник по id (вне зависимости от is_active)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT s.id, s.name, s.normalized_name, s.owner_manager_id,
+                   s.office, s.is_active, s.created_at,
+                   m.name AS manager_name
+            FROM sources s
+            JOIN managers m ON m.id = s.owner_manager_id
+            WHERE s.id = $1
+            """,
+            source_id,
+        )
+        return dict(row) if row else None
+
+
+async def list_sources_by_manager(
+    manager_id: int,
+    page: int = 1,
+    page_size: int = 5,
+    only_active: bool = True,
+) -> list[dict]:
+    """Постраничный список источников менеджера."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        offset = max(0, (page - 1) * page_size)
+        rows = await conn.fetch(
+            f"""
+            SELECT id, name, created_at, is_active
+            FROM sources
+            WHERE owner_manager_id = $1
+              {"AND is_active = TRUE" if only_active else ""}
+            ORDER BY created_at DESC
+            LIMIT $2 OFFSET $3
+            """,
+            manager_id, page_size, offset,
+        )
+        return [dict(r) for r in rows]
+
+
+async def count_sources_by_manager(
+    manager_id: int, only_active: bool = True
+) -> int:
+    """Сколько источников у менеджера (для пагинации)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        val = await conn.fetchval(
+            f"""
+            SELECT COUNT(*) FROM sources
+            WHERE owner_manager_id = $1
+              {"AND is_active = TRUE" if only_active else ""}
+            """,
+            manager_id,
+        )
+        return val or 0
+
+
+async def count_military_by_source(source_id: int) -> int:
+    """Сколько лидов привязано к источнику (для подтверждения удаления)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        val = await conn.fetchval(
+            "SELECT COUNT(*) FROM persons_military WHERE source_id = $1",
+            source_id,
+        )
+        return val or 0
+
+
+async def attach_source_to_military(military_id: int, source_id: int) -> bool:
+    """Прикрепить источник к военному. True если ок."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE persons_military SET source_id = $1, updated_at = NOW() WHERE id = $2",
+            source_id, military_id,
+        )
+        return result.endswith(" 1")
+
+
+async def rename_source(source_id: int, new_name: str) -> tuple[bool, str | None]:
+    """
+    Переименовать источник.
+    Возвращает (success, error_msg).
+
+    Ошибки:
+    - "empty" — пустое имя
+    - "taken_by_office:<office>" — нормализованное имя уже занято кем-то
+       в указанном офисе
+    - "not_found" — источник не существует
+    """
+    new_normalized = _normalize_source_name(new_name)
+    if not new_normalized:
+        return False, "empty"
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # Проверка на конфликт (исключая сам этот источник)
+        conflict = await conn.fetchrow(
+            """
+            SELECT s.id, s.office FROM sources s
+            WHERE s.normalized_name = $1
+              AND s.is_active = TRUE
+              AND s.id != $2
+            """,
+            new_normalized, source_id,
+        )
+        if conflict:
+            return False, f"taken_by_office:{conflict['office']}"
+
+        result = await conn.execute(
+            """
+            UPDATE sources
+            SET name = $1, normalized_name = $2, updated_at = NOW()
+            WHERE id = $3 AND is_active = TRUE
+            """,
+            new_name.strip(), new_normalized, source_id,
+        )
+        if not result.endswith(" 1"):
+            return False, "not_found"
+        return True, None
+
+
+async def soft_delete_source(source_id: int) -> bool:
+    """Soft delete источника. Лиды на нём остаются с source_id."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE sources SET is_active = FALSE, updated_at = NOW() WHERE id = $1",
+            source_id,
+        )
+        return result.endswith(" 1")
+
+
+# ════════════════════════════════════════════════════════════════
+#  Disable / enable manager — временное отключение доступа
+# ════════════════════════════════════════════════════════════════
+
+async def disable_manager(manager_id: int) -> bool:
+    """
+    Отключить менеджера (is_disabled=true).
+    Менеджер перестаёт иметь доступ к боту до включения обратно.
+    Возвращает True если изменение применилось.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE managers
+            SET is_disabled = TRUE
+            WHERE id = $1 AND is_active = TRUE
+            """,
+            manager_id,
+        )
+        return result.endswith(" 1")
+
+
+async def enable_manager(manager_id: int) -> bool:
+    """
+    Включить менеджера обратно (is_disabled=false).
+    Возвращает True если изменение применилось.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE managers
+            SET is_disabled = FALSE
+            WHERE id = $1 AND is_active = TRUE
+            """,
+            manager_id,
+        )
+        return result.endswith(" 1")

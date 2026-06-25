@@ -13,7 +13,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from bot.db.connection import get_pool, close_pool
-from bot.handlers import commands, admin, military, relatives, probiv, stats, leads, export, cost, search, errors
+from bot.handlers import commands, admin, military, relatives, probiv, stats, leads, export, cost, search, sources, errors
 from bot.api_server import start_api_server
 from bot.middlewares.access import AccessMiddleware
 from bot.utils.logging_config import setup_logging
@@ -43,6 +43,7 @@ async def main():
     dp.include_router(export.router)
     dp.include_router(cost.router)
     dp.include_router(search.router)
+    dp.include_router(sources.router)
     dp.include_router(commands.router)
     # Глобальный обработчик ошибок — должен быть последним,
     # чтобы поймать ошибки из всех остальных роутеров.
