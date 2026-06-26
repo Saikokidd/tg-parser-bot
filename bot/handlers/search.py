@@ -27,6 +27,7 @@ from bot.db.queries import (
     get_relatives_of_military,
 )
 from bot.keyboards.menus import search_results_kb
+from bot.utils.phones_fmt import fmt_phone_compact, fmt_phones_full
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -133,8 +134,11 @@ async def search_query(message: Message, state: FSMContext, manager: dict | None
             birth_str = birth.strftime("%d.%m.%Y") if birth else "—"
             mgr = r.get("manager_name") or "—"
             office_str = r.get("office") or "—"
-            phone = r.get("phone") or ""
-            phone_str = f" | Тел: {_html.escape(phone)}" if phone else ""
+            r_extra = r.get("extra") or {}
+            phone_compact = fmt_phone_compact(
+                r.get("phones") or [], r.get("phone"), r_extra.get("operator")
+            )
+            phone_str = f" | Тел: {_html.escape(phone_compact)}" if phone_compact else ""
             attached = r.get("attached_to") or []
             if attached:
                 names = ", ".join(
@@ -267,8 +271,11 @@ def _format_military_compact(m: dict, relatives: list) -> str:
         for r in relatives[:10]:
             r_birth = r.get("birth_date")
             r_birth_str = r_birth.strftime("%d.%m.%Y") if r_birth else "—"
-            phone = r.get("phone") or ""
-            phone_str = f" | Тел: {_html.escape(phone)}" if phone else ""
+            r_extra = r.get("extra") or {}
+            phone_compact = fmt_phone_compact(
+                r.get("phones") or [], r.get("phone"), r_extra.get("operator")
+            )
+            phone_str = f" | Тел: {_html.escape(phone_compact)}" if phone_compact else ""
             lines.append(
                 f"  • {_html.escape(r['full_name'])} • {r_birth_str}{phone_str}"
             )
@@ -290,8 +297,12 @@ def _format_relative_compact(r: dict) -> str:
         f"Офис: {r.get('office') or '—'}",
         f"ID: {r['id']}",
     ]
-    if r.get("phone"):
-        lines.append(f"Тел: {_html.escape(r['phone'])}")
+    extra_for_phones = r.get("extra") or {}
+    phones_full = fmt_phones_full(
+        r.get("phones") or [], r.get("phone"), extra_for_phones.get("operator")
+    )
+    if phones_full:
+        lines.append(f"Тел: {_html.escape(phones_full)}")
     if r.get("address"):
         addr = r["address"]
         if len(addr) > 100:

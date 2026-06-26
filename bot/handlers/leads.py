@@ -29,6 +29,7 @@ from bot.db.queries import (
 )
 from bot.parser.military_parser import status_label
 from bot.parser.relative_parser import parse_date as parse_rel_date, normalize_phone
+from bot.utils.phones_fmt import fmt_phone_compact, fmt_phones_full
 from bot.keyboards.menus import (
     leads_list_kb, lead_card_kb,
     confirm_delete_lead_kb, confirm_delete_relative_kb,
@@ -192,8 +193,13 @@ def _format_lead_card(military: dict, relatives: list) -> str:
             r_birth_str = r_birth.strftime('%d.%m.%Y') if r_birth else '—'
             block = [f"{i}. *{e(r.get('full_name'))}*"]
             block.append(f"   ДР: {r_birth_str}")
-            if r.get('phone'):
-                block.append(f"   📞 {e(r['phone'])}")
+            # Multi-phones: показываем primary + сколько ещё (формат '+79... (МТС) ✅ +N ещё')
+            r_extra_phone = (r.get('extra') or {}).get('operator')
+            phones_compact = fmt_phone_compact(
+                r.get('phones') or [], r.get('phone'), r_extra_phone
+            )
+            if phones_compact:
+                block.append(f"   📞 {e(phones_compact)}")
             if r.get('address'):
                 addr = r['address']
                 if len(addr) > 80:
@@ -202,7 +208,7 @@ def _format_lead_card(military: dict, relatives: list) -> str:
             r_extra = r.get('extra') or {}
             for key, label in [('snils', 'СНИЛС'), ('inn', 'ИНН'),
                                ('passport', 'Паспорт'), ('email', 'Почта'),
-                               ('operator', 'Оператор'), ('region', 'Регион')]:
+                               ('region', 'Регион')]:
                 if r_extra.get(key):
                     block.append(f"   {label}: {e(r_extra[key])}")
             # Стандартные ключи которые мы уже показали выше + служебные
@@ -471,7 +477,7 @@ async def relative_edit_menu(callback: CallbackQuery, manager: dict | None = Non
         f"*Редактирование:* {relative['full_name']}\n",
         f"ФИО: {relative.get('full_name') or '—'}",
         f"ДР: {birth_str}",
-        f"Телефон: {relative.get('phone') or '—'}",
+        f"Телефон: {fmt_phones_full(relative.get('phones') or [], relative.get('phone'), extra.get('operator')) or '—'}",
         f"Адрес: {relative.get('address') or '—'}",
         f"СНИЛС: {extra.get('snils') or '—'}",
         f"ИНН: {extra.get('inn') or '—'}",

@@ -363,6 +363,9 @@ async def _save_relative_phones_from_template(
         
         from bot.parser.relative_parser import normalize_phone
         
+        # Лимит: максимум 3 уникальных номера на родственника
+        MAX_PHONES_PER_RELATIVE = 3
+        
         phones_to_insert = []
         seen_normalized = set()
         
@@ -389,6 +392,9 @@ async def _save_relative_phones_from_template(
                 "source_frequency": freq,
                 "is_primary": is_primary,
             })
+            # Достигли лимита — выходим
+            if len(phones_to_insert) >= MAX_PHONES_PER_RELATIVE:
+                break
         
         if not phones_to_insert:
             logger.info(f"multi-phones: relative_id={relative_id} nothing to insert")

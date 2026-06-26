@@ -190,7 +190,7 @@ async def link_military_relative(military_id: int, relative_id: int, manager_id:
 
 
 async def get_relatives_of_military(military_id: int) -> list:
-    """Все родственники привязанные к военному"""
+    """Все родственники привязанные к военному (с подмешанными phones)"""
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -203,7 +203,13 @@ async def get_relatives_of_military(military_id: int) -> list:
             """,
             military_id
         )
-        return [dict(r) for r in rows]
+        result = [dict(r) for r in rows]
+        if result:
+            rel_ids = [r["id"] for r in result]
+            phones_map = await get_phones_for_relatives(rel_ids)
+            for r in result:
+                r["phones"] = phones_map.get(r["id"], [])
+        return result
 
 
 # ════════════════════════════════════════════════════════════
@@ -387,7 +393,12 @@ async def get_relative_by_id(relative_id: int) -> Optional[dict]:
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM relatives WHERE id = $1", relative_id)
-        return dict(row) if row else None
+        if not row:
+            return None
+        result = dict(row)
+        # Подмешиваем phones из relative_phones (multi-phones фича)
+        result["phones"] = await get_phones_for_relative(relative_id)
+        return result
 
 
 async def update_relative_field(relative_id: int, field: str, value) -> None:
