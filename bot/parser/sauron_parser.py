@@ -429,6 +429,44 @@ def format_relative_template(template: dict) -> str:
     phone_info = template.get('phone_info') or {}
     operator = phone_info.get('operator') or ''
     region = phone_info.get('region') or ''
+    
+    # Формируем многострочный блок телефонов из phone_candidates_with_freq.
+    # Primary с оператором (от voxlink), дополнительные без оператора —
+    # они подтянутся в фоне и появятся в карточке после закрепления.
+    MAX_PHONES = 3
+    candidates_with_freq = template.get('phone_candidates_with_freq') or []
+    
+    if candidates_with_freq:
+        # Берём primary номер из template.phone (он мог пройти phone-dedup),
+        # остальные кандидаты — по убыванию частоты, без primary, до MAX_PHONES всего
+        phone_lines = []
+        primary_norm = re.sub(r'\D', '', phone)[-10:] if phone else ''
+        added_keys = set()
+        
+        # Сначала primary с оператором
+        if phone:
+            line = f"{phone}"
+            if operator:
+                line += f" ({operator})"
+            phone_lines.append(line)
+            if primary_norm:
+                added_keys.add(primary_norm)
+        
+        # Дальше остальные кандидаты, без operator
+        for cand in candidates_with_freq:
+            if len(phone_lines) >= MAX_PHONES:
+                break
+            cand_phone = cand.get('phone') or ''
+            cand_norm = re.sub(r'\D', '', cand_phone)[-10:]
+            if not cand_norm or cand_norm in added_keys:
+                continue
+            added_keys.add(cand_norm)
+            phone_lines.append(cand_phone)
+        
+        phones_block = "\n         ".join(phone_lines)  # отступ под "Телефон: "
+    else:
+        # Fallback: один номер (старая логика)
+        phones_block = phone
 
     valid_emails = template.get('valid_emails') or []
     email_str = ", ".join(valid_emails) if valid_emails else '—'
@@ -440,8 +478,7 @@ def format_relative_template(template: dict) -> str:
         f"ФИО: {template.get('full_name', '')}",
         f"ДР: {template.get('birth_date_str', '')}",
         f"Адрес: {template.get('address', '')}",
-        f"Телефон: {phone}",
-        f"Оператор: {operator}",
+        f"Телефон: {phones_block}",
         f"Регион: {region}",
         f"СНИЛС: {template.get('snils', '')}",
         f"ИНН: {template.get('inn', '')}",
