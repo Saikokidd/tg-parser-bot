@@ -113,9 +113,12 @@ def _fmt_phones(phones: list[dict], legacy_phone: str | None,
     Если phones пуст — fallback на legacy_phone + legacy_operator (одна строка).
     Primary номер всегда первым.
     """
+    # Excel интерпретирует значения начинающиеся с '+', '-', '=' как формулы.
+    # Префикс одинарной кавычки заставляет Excel считать ячейку текстовой —
+    # сама кавычка при этом не отображается.
     if phones:
         lines = []
-        for p in phones:
+        for i, p in enumerate(phones):
             phone = p.get("phone") or ""
             op = p.get("operator") or "—"
             status_key = p.get("hlr_status") or ""
@@ -123,6 +126,9 @@ def _fmt_phones(phones: list[dict], legacy_phone: str | None,
             line = f"{phone} ({op})"
             if label:
                 line = f"{line} {label}"
+            # Префикс ' только для первой строки — Excel применяет на всю ячейку
+            if i == 0 and line.startswith(("+", "-", "=")):
+                line = "'" + line
             lines.append(line)
         return "\n".join(lines)
     
@@ -131,7 +137,10 @@ def _fmt_phones(phones: list[dict], legacy_phone: str | None,
         parts = [legacy_phone]
         if legacy_operator:
             parts.append(f"({legacy_operator})")
-        return " ".join(parts)
+        result = " ".join(parts)
+        if result.startswith(("+", "-", "=")):
+            result = "'" + result
+        return result
     return ""
 
 
