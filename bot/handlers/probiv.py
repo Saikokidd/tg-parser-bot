@@ -341,17 +341,28 @@ async def probiv_done(callback: CallbackQuery, state: FSMContext):
 # ════════════════════════════════════════════════════════════
 
 async def _save_relative_phones_from_template(
-    template: dict, relative_id: int, primary_phone: str | None
+    template: dict, relative_id: int, primary_phone: str | None,
+    office: str | None = None,
 ) -> int:
     """
     Сохранить все номера из Sauron-template в relative_phones.
+    
+    Фича работает только для офиса pvl (HLR-проверка для них одних).
+    Для dp/ha записи в relative_phones не создаём — это мусор который
+    никогда не будет использован.
+    
     Phone-dedup: пропускаем номера которые уже заняты в БД
     (не сохраняем чужие, согласно решению F2(d)).
     
     primary_phone — нормализованный номер который ушёл в relatives.phone
                     (помечается is_primary=true).
+    office — офис родственника, для фильтрации.
     Возвращает количество вставленных записей.
     """
+    # Фильтр по офису: фича только для pvl
+    if office and office != "pvl":
+        return 0
+    
     try:
         candidates = template.get("phone_candidates_with_freq") or []
         logger.info(
@@ -576,9 +587,10 @@ async def attach_do(callback: CallbackQuery, state: FSMContext, manager: dict):
     # Дубля нет — сразу сохраняем + создаём связку
     rel = await insert_relative_v2(relative_data, manager_id)
     await link_military_relative(military_id, rel["id"], manager_id)
-    # Сохраняем все номера из Sauron-template в relative_phones
+    # Сохраняем все номера из Sauron-template в relative_phones (только pvl)
     await _save_relative_phones_from_template(
-        template, rel["id"], relative_data.get("phone")
+        template, rel["id"], relative_data.get("phone"),
+        office=rel.get("office"),
     )
     await callback.message.edit_reply_markup(reply_markup=None)
     await _finalize_attach(callback, state, relative_data["full_name"], reused=False)
@@ -599,7 +611,8 @@ async def attach_dup_new(callback: CallbackQuery, state: FSMContext, manager: di
     rel = await insert_relative_v2(relative_data, manager_id)
     await link_military_relative(military_id, rel["id"], manager_id)
     await _save_relative_phones_from_template(
-        template, rel["id"], relative_data.get("phone")
+        template, rel["id"], relative_data.get("phone"),
+        office=rel.get("office"),
     )
     await callback.message.edit_text(
         f"➕ Создан новый родственник: *{relative_data['full_name']}*",

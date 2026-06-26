@@ -58,11 +58,16 @@ if not logger.handlers:
 
 # ──────────── Один опрос ────────────
 
+# Сколько максимум держим запрос в in_work — после этого помечаем как error
+STUCK_THRESHOLD_HOURS = 48
+
+
 async def _poll_one(rp: dict, stats: dict, sem: asyncio.Semaphore):
     """Опросить статус одного запроса."""
     async with sem:
         phone_id = rp["id"]
         req_id = rp["hlr_request_id"]
+        created_at = rp.get("created_at")
         try:
             status = await get_hlr_status(req_id)
         except SmsaeroTransientError as e:
@@ -83,6 +88,21 @@ async def _poll_one(rp: dict, stats: dict, sem: asyncio.Semaphore):
             await mark_phone_hlr_error(phone_id)
             stats["errors"] = stats.get("errors", 0) + 1
             return
+
+        # Проверка зависания: если запрос висит > 48 часов и smsaero
+        # всё ещё отвечает 'in_work' — помечаем как error, не будем мучить
+        if status == "in_work" and created_at:
+            from datetime import datetime, timedelta, timezone
+            now = datetime.now(created_at.tzinfo) if created_at.tzinfo else datetime.now()
+            age = now - created_at
+            if age > timedelta(hours=STUCK_THRESHOLD_HOURS):
+                logger.warning(
+                    f"[#{phone_id}] req_id={req_id}: stuck in_work "
+                    f"for {age}, marking as error"
+                )
+                await mark_phone_hlr_error(phone_id)
+                stats["stuck_marked_error"] = stats.get("stuck_marked_error", 0) + 1
+                return
 
         # Обновляем
         await update_phone_hlr_status(phone_id, status)

@@ -1962,7 +1962,7 @@ async def phones_pending_hlr_poll(limit: int = 200) -> list[dict]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, phone, hlr_request_id
+            SELECT id, phone, hlr_request_id, created_at
             FROM relative_phones
             WHERE hlr_request_id IS NOT NULL
               AND hlr_status IN ('pending', 'in_work')
