@@ -374,8 +374,9 @@ async def _save_relative_phones_from_template(
         
         from bot.parser.relative_parser import normalize_phone
         
-        # Лимит: максимум 3 уникальных номера на родственника
-        MAX_PHONES_PER_RELATIVE = 3
+        # Сохраняем только primary номер (самый частый из Sauron-ответа).
+        # Multi-phones фича откатана — для HLR-проверки достаточно одного.
+        MAX_PHONES_PER_RELATIVE = 1
         
         phones_to_insert = []
         seen_normalized = set()
