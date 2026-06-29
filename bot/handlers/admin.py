@@ -347,9 +347,14 @@ async def add_manager_telegram_id(message: Message, state: FSMContext):
         )
     except Exception as e:
         err = str(e)
-        if "managers_name_unique" in err:
+        if "managers_name_office_unique" in err or "managers_name_unique" in err:
+            # Кто-то с таким именем уже есть в этом офисе.
+            # Может быть удалён (is_active=false) — тогда админ должен
+            # обратиться к super_admin для восстановления.
             await message.answer(
-                f"⚠️ Менеджер с именем *{name}* уже существует.",
+                f"⚠️ Менеджер с именем *{name}* уже существует в этом офисе.\n\n"
+                f"Возможно, он был ранее удалён, но запись осталась в БД. "
+                f"Обратитесь к super-админу — он может восстановить старую запись.",
                 parse_mode="Markdown",
                 reply_markup=back_to_managers()
             )
@@ -360,8 +365,16 @@ async def add_manager_telegram_id(message: Message, state: FSMContext):
                 reply_markup=back_to_managers()
             )
         else:
-            await message.answer(f"❌ Ошибка: {err}", reply_markup=back_to_managers())
-
+            # На случай неизвестных ошибок — логируем и показываем
+            # сокращённое сообщение, не сырой traceback
+            import logging
+            logging.getLogger(__name__).exception(
+                f"create_manager error: name={name}, tg_id={telegram_id}, office={office}"
+            )
+            await message.answer(
+                f"❌ Не удалось добавить менеджера. Обратитесь к разработчику.",
+                reply_markup=back_to_managers()
+            )
     await state.clear()
 
 
