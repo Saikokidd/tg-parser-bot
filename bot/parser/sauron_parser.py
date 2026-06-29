@@ -437,7 +437,9 @@ def format_relative_template(template: dict) -> str:
         if operator:
             phones_block += f" ({operator})"
     else:
-        phones_block = ""
+        # Sauron не вернул телефон для этого человека — дадим
+        # менеджеру понять что это не баг бота, а пробел в данных.
+        phones_block = "— (Sauron не нашёл)"
 
     valid_emails = template.get('valid_emails') or []
     email_str = ", ".join(valid_emails) if valid_emails else '—'
