@@ -10,6 +10,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from aiogram import Bot, Dispatcher
+import socket
+from aiohttp import TCPConnector
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from bot.db.connection import get_pool, close_pool
@@ -28,7 +31,14 @@ logger = logging.getLogger(__name__)
 
 
 async def main():
-    bot = Bot(token=os.getenv("BOT_TOKEN"))
+    # Форсируем IPv4: IPv6-egress на VPS мёртвый, а aiohttp (aiodns)
+    # игнорирует /etc/gai.conf, поэтому приоритет задаём прямо в сессии.
+    _session = AiohttpSession()
+    _session._connector_init = dict(
+        _session._connector_init or {},
+        family=socket.AF_INET,
+    )
+    bot = Bot(token=os.getenv("BOT_TOKEN"), session=_session)
     dp = Dispatcher(storage=MemoryStorage())
 
     # Middleware на все апдейты

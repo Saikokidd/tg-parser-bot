@@ -68,7 +68,7 @@ RELATIVE_COLUMNS = [
 
 # ──────────── Помощники форматирования ────────────
 
-STD_EXTRA_KEYS_RELATIVE = {"snils", "inn", "passport", "email", "operator", "region"}
+STD_EXTRA_KEYS_RELATIVE = {"snils", "inn", "passport", "email", "emails", "operator", "region", "phones_all", "old_operator"}
 STD_EXTRA_KEYS_MILITARY = {"unit", "callsign", "note", "source"}
 
 
@@ -100,43 +100,55 @@ HLR_STATUS_LABELS = {
 }
 
 
+def _fmt_op(operator: str | None, old_operator: str | None) -> str:
+    """Оператор с историей переноса: 'ВымпелКом→МегаФон' если номер перенесён."""
+    op = operator or "—"
+    if old_operator and old_operator != operator:
+        return f"{old_operator}→{op}"
+    return op
+
+
 def _fmt_phones(phones: list[dict], legacy_phone: str | None,
-                 legacy_operator: str | None) -> str:
+                 legacy_operator: str | None,
+                 phones_all: list[dict] | None = None,
+                 legacy_old_operator: str | None = None) -> str:
     """
     Формирует многострочную ячейку с телефонами.
-    
-    Формат каждой строки:
-        +79... (МТС) ✅
-        +79... (Билайн) ❌ выкл
-        +79... (Мегафон) ⊝
-    
-    Если phones пуст — fallback на legacy_phone + legacy_operator (одна строка).
+    Оператор с историей переноса (old_operator), если номер был перенесён.
     Primary номер всегда первым.
     """
-    # Excel интерпретирует значения начинающиеся с '+', '-', '=' как формулы.
-    # Префикс одинарной кавычки заставляет Excel считать ячейку текстовой —
-    # сама кавычка при этом не отображается.
     if phones:
         lines = []
         for i, p in enumerate(phones):
             phone = p.get("phone") or ""
-            op = p.get("operator") or "—"
+            op = _fmt_op(p.get("operator"), p.get("old_operator"))
             status_key = p.get("hlr_status") or ""
             label = HLR_STATUS_LABELS.get(status_key, "")
             line = f"{phone} ({op})"
             if label:
                 line = f"{line} {label}"
-            # Префикс ' только для первой строки — Excel применяет на всю ячейку
             if i == 0 and line.startswith(("+", "-", "=")):
                 line = "'" + line
             lines.append(line)
         return "\n".join(lines)
-    
-    # Fallback на legacy (старые записи у которых ещё не наполнили relative_phones)
+
+    # phones_all — сауроновский dp-формат: все номера с операторами стопкой.
+    if phones_all:
+        lines = []
+        for i, p in enumerate(phones_all):
+            ph = p.get("phone") or ""
+            op = _fmt_op(p.get("operator"), p.get("old_operator"))
+            line = f"{ph} ({op})"
+            if i == 0 and line.startswith(("+", "-", "=")):
+                line = "'" + line
+            lines.append(line)
+        return "\n".join(lines)
+
+    # Fallback на legacy
     if legacy_phone:
         parts = [legacy_phone]
-        if legacy_operator:
-            parts.append(f"({legacy_operator})")
+        if legacy_operator or legacy_old_operator:
+            parts.append(f"({_fmt_op(legacy_operator, legacy_old_operator)})")
         result = " ".join(parts)
         if result.startswith(("+", "-", "=")):
             result = "'" + result
@@ -235,6 +247,8 @@ def build_xlsx(military_records: list, relatives: list,
             r.get("phones") or [],
             r.get("phone"),
             extra.get("operator"),
+            extra.get("phones_all"),
+            extra.get("old_operator"),
         )
         row = [
             r.get("id"),
@@ -246,7 +260,7 @@ def build_xlsx(military_records: list, relatives: list,
             extra.get("snils") or "",
             extra.get("inn") or "",
             extra.get("passport") or "",
-            extra.get("email") or "",
+            ", ".join(extra.get("emails") or []) or (extra.get("email") or ""),
             linked_text,
             custom_fields,
         ]

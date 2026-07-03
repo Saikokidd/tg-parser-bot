@@ -81,6 +81,8 @@ async def _update_with_info(rel_id: int, current_extra: dict, info: dict) -> Non
         new_extra["operator"] = info["operator"]
     if info.get("region"):
         new_extra["region"] = info["region"]
+    if info.get("old_operator"):
+        new_extra["old_operator"] = info["old_operator"]
     # Сбрасываем счётчик попыток если был
     new_extra.pop("voxlink_attempts", None)
 
@@ -241,7 +243,7 @@ async def _process_one_phone(rp: dict, stats: dict, sem: asyncio.Semaphore):
             return
 
         if info and info.get("operator"):
-            await update_phone_operator(phone_id, info["operator"])
+            await update_phone_operator(phone_id, info["operator"], info.get("old_operator"))
             stats["rp_updated"] = stats.get("rp_updated", 0) + 1
         else:
             # 404 или nothing — пометим operator_checked_at (через None в update)

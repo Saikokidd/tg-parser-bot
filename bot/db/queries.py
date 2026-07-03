@@ -1873,7 +1873,7 @@ async def get_phones_for_relative(relative_id: int) -> list[dict]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, relative_id, phone, operator, operator_checked_at,
+            SELECT id, relative_id, phone, operator, old_operator, operator_checked_at,
                    hlr_status, hlr_request_id, hlr_checked_at,
                    is_primary, source_frequency, created_at
             FROM relative_phones
@@ -1896,7 +1896,7 @@ async def get_phones_for_relatives(relative_ids: list[int]) -> dict[int, list[di
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, relative_id, phone, operator,
+            SELECT id, relative_id, phone, operator, old_operator,
                    hlr_status, is_primary, source_frequency, created_at
             FROM relative_phones
             WHERE relative_id = ANY($1::int[])
@@ -1975,7 +1975,7 @@ async def phones_pending_hlr_poll(limit: int = 200) -> list[dict]:
 
 
 async def update_phone_operator(
-    phone_id: int, operator: str | None
+    phone_id: int, operator: str | None, old_operator: str | None = None
 ) -> bool:
     """
     Обновить оператор. Если оператор пуст/None → ставим NULL,
@@ -2011,19 +2011,21 @@ async def update_phone_operator(
                 SET operator = $1,
                     operator_checked_at = NOW(),
                     hlr_status = 'skipped_operator',
-                    hlr_checked_at = NOW()
+                    hlr_checked_at = NOW(),
+                    old_operator = $3
                 WHERE id = $2
                 """,
-                operator, phone_id,
+                operator, phone_id, old_operator,
             )
         else:
             await conn.execute(
                 """
                 UPDATE relative_phones
-                SET operator = $1, operator_checked_at = NOW()
+                SET operator = $1, operator_checked_at = NOW(),
+                    old_operator = $3
                 WHERE id = $2
                 """,
-                operator, phone_id,
+                operator, phone_id, old_operator,
             )
         return True
 

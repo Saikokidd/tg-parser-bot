@@ -307,3 +307,166 @@ def parse_relatives_batch(text: str) -> list[dict]:
             continue
         results.append(parse_relative(block))
     return results
+
+
+# ══════════════════════════════════════════════════════════════════
+# Формат "сводка Саурона" — тестовая фича (просили dp).
+# Триггер: слово "Личности". Всё до него отбрасывается.
+# Откат: env-флаг SAURON_SUMMARY_INPUT_ENABLED (роутинг в хендлере).
+# ══════════════════════════════════════════════════════════════════
+
+SAURON_KEY = "личности"
+SAURON_MAX_VALUES = 3
+
+# нормализованный ярлык -> поле
+SAURON_WHITELIST = {
+    'личности': 'full_name', 'фио': 'full_name',
+    'др': 'birth_date', 'дата рождения': 'birth_date', 'др:': 'birth_date',
+    'адрес': 'address',
+    'телефон': 'phone', 'тел': 'phone', 'тел.': 'phone', 'номер': 'phone', 'телефоны': 'phone',
+    'снилс': 'snils',
+    'инн': 'inn',
+    'паспорт': 'passport',
+    'email': 'email', 'e-mail': 'email', 'почта': 'email', 'мейл': 'email', 'эл.почта': 'email',
+}
+# ярлыки, которые надо игнорировать (но распознавать как границу поля)
+SAURON_IGNORE_STARTS = ('автомобили', 'водительское удостоверение', 'ву')
+# заглушки пустого значения
+SAURON_EMPTY_TOKENS = {'', '—', '-', '–', 'нет', 'не найдено', 'не указано'}
+
+
+def has_sauron_key(text: str) -> bool:
+    return SAURON_KEY in (text or "").lower()
+
+
+def _snorm(s: str) -> str:
+    return re.sub(r'\s+', ' ', (s or '').strip().lower())
+
+
+def _split_name_date(line: str):
+    line = line.strip()
+    m = re.search(r'(\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4})\s*$', line)
+    if m:
+        d = parse_date(m.group(1))
+        return d, (line[:m.start()].strip() or None)
+    return None, (line or None)
+
+
+def _sauron_match_header(line: str):
+    """
+    Определяет, является ли строка заголовком секции.
+    Возвращает (field | 'IGNORE' | None, inline_value).
+    """
+    if ':' in line:
+        key_part, inline = line.split(':', 1)
+        if len(key_part) <= 40 and not re.search(r'\d', key_part):
+            field = SAURON_WHITELIST.get(_snorm(key_part))
+            if field:
+                return field, inline.strip()
+            return 'IGNORE', inline.strip()   # любая другая "Метка:" — граница, значение отбрасываем
+        return None, None                     # двоеточие есть, но это значение
+    norm = _snorm(line)
+    if norm in SAURON_WHITELIST:              # голый ярлык без двоеточия (вариант 1)
+        return SAURON_WHITELIST[norm], ''
+    for lbl in SAURON_IGNORE_STARTS:
+        if norm.startswith(lbl):
+            return 'IGNORE', ''
+    return None, None
+
+
+def _sauron_values(raw_list):
+    """Плоский список значений: режем по запятым/точкам-с-запятой/переносам, чистим заглушки."""
+    out = []
+    for rv in raw_list:
+        for part in re.split(r'[;,\n]', rv):
+            part = part.strip()
+            if part and _snorm(part) not in SAURON_EMPTY_TOKENS:
+                out.append(part)
+    return out
+
+
+def parse_sauron_summary(text: str) -> dict:
+    """
+    Разбирает сводку Саурона в один dict родственника (всегда 1 человек).
+    Белый список полей; всё вне списка (Автомобили, ВУ, соцсети...) игнорируется.
+    По каждому многозначному полю — первые SAURON_MAX_VALUES значений.
+    """
+    result = {'full_name': None, 'birth_date': None, 'phone': None,
+              'address': None, 'extra': {}}
+    if not text:
+        return result
+    idx = text.lower().find(SAURON_KEY)
+    if idx == -1:
+        return result
+    region = text[idx:]
+
+    fields = {}          # field -> list[str] сырых значений
+    cur_field = None
+    cur_values = []
+
+    def _flush():
+        if cur_field and cur_field != 'IGNORE':
+            fields.setdefault(cur_field, []).extend(cur_values)
+
+    for raw_line in region.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        field, inline = _sauron_match_header(line)
+        if field is not None:
+            _flush()
+            cur_field = field
+            cur_values = [inline] if inline else []
+        elif cur_field is not None:
+            cur_values.append(line)
+    _flush()
+
+    # ── ФИО (+ дата в хвосте) ──
+    if fields.get('full_name'):
+        d, name = _split_name_date(fields['full_name'][0])
+        result['full_name'] = name
+        if d:
+            result['birth_date'] = d
+    # ── отдельная ДР, если ФИО без даты ──
+    if not result['birth_date'] and fields.get('birth_date'):
+        for v in _sauron_values(fields['birth_date']):
+            d = parse_date(v)
+            if d:
+                result['birth_date'] = d
+                break
+    # ── адрес ──
+    if fields.get('address'):
+        addr = _sauron_values(fields['address'])
+        if addr:
+            result['address'] = ", ".join(addr)
+
+    # ── телефоны: первые 3, основной в phone, остальные в phones_other ──
+    phones = []
+    for v in _sauron_values(fields.get('phone', [])):
+        p = normalize_phone(v)
+        if p and p not in phones:
+            phones.append(p)
+    phones = phones[:SAURON_MAX_VALUES]
+    if phones:
+        result['phone'] = phones[0]
+        if len(phones) > 1:
+            result['extra']['phones_other'] = ", ".join(phones[1:])
+
+    # ── email: списком ──
+    emails = [v.lower() for v in _sauron_values(fields.get('email', []))][:SAURON_MAX_VALUES]
+    if emails:
+        result['extra']['emails'] = emails
+
+    # ── СНИЛС / ИНН: только цифры ──
+    for key in ('snils', 'inn'):
+        digits = [re.sub(r'\D', '', v) for v in _sauron_values(fields.get(key, []))]
+        digits = [d for d in digits if d][:SAURON_MAX_VALUES]
+        if digits:
+            result['extra'][key] = ", ".join(digits)
+
+    # ── Паспорт: как есть (могут быть серии типа XII-БА...), не режем цифры ──
+    passports = [re.sub(r'\s+', ' ', v) for v in _sauron_values(fields.get('passport', []))][:SAURON_MAX_VALUES]
+    if passports:
+        result['extra']['passport'] = ", ".join(passports)
+
+    return result

@@ -427,7 +427,9 @@ def format_relative_template(template: dict) -> str:
 
     phone = template.get('phone', '') or ''
     phone_info = template.get('phone_info') or {}
-    operator = phone_info.get('operator') or ''
+    _op = phone_info.get('operator') or ''
+    _old_op = phone_info.get('old_operator') or ''
+    operator = f"{_old_op}→{_op}" if (_old_op and _old_op != _op) else _op
     region = phone_info.get('region') or ''
     
     # Показываем только primary номер с оператором (от voxlink).

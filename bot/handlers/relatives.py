@@ -5,6 +5,7 @@
 - Сохранение + связка military_relatives
 - Цикл "Добавить ещё?"
 """
+import os
 from datetime import datetime
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -15,7 +16,15 @@ from bot.utils.menu_guard import is_menu_button_pressed
 
 from bot.parser.relative_parser import (
     parse_relative, parse_relatives_batch,
+    parse_sauron_summary, has_sauron_key,
     validate_relative, format_relative, format_relative_record
+)
+
+# Тестовая фича (dp): приём сводки Саурона по ключу "Личности".
+# Откат: SAURON_SUMMARY_INPUT_ENABLED=0 в .env + рестарт.
+SAURON_SUMMARY_INPUT_ENABLED = (
+    os.getenv("SAURON_SUMMARY_INPUT_ENABLED", "").strip().lower()
+    in ("1", "true", "yes", "on")
 )
 
 from bot.parser.military_parser import status_label
@@ -187,7 +196,13 @@ async def receive_relative_template(message: Message, state: FSMContext):
     Принимает один или несколько блоков родственников разделённых пустыми строками.
     Обрабатывает последовательно с дубль-чеком, в конце выводит сводку.
     """
-    parsed_list = parse_relatives_batch(message.text)
+    text = message.text or ""
+    if SAURON_SUMMARY_INPUT_ENABLED and has_sauron_key(text):
+        parsed_list = [parse_sauron_summary(text)]   # формат Саурона -> 1 родственник
+        for _p in parsed_list:
+            _p["_enrich_all_phones"] = True          # маркер: обогатить все номера (dp)
+    else:
+        parsed_list = parse_relatives_batch(text)
 
     # Разделяем валидные и невалидные блоки
     valid_queue = []
@@ -453,30 +468,52 @@ async def _enrich_with_voxlink(parsed: dict) -> dict:
     При ошибке — тихо возвращает parsed без изменений (voxlink не критичен).
     """
     phone = parsed.get("phone")
+    enrich_all = parsed.pop("_enrich_all_phones", False)
+
+    phone = parsed.get("phone")
     if not phone:
         return parsed
 
     extra = parsed.get("extra") or {}
-    # Если оба поля уже есть — не дёргаем API
-    if extra.get("operator") and extra.get("region"):
-        return parsed
 
-    try:
-        from bot.services.voxlink_service import lookup_phone
-        info = await lookup_phone(phone)
-    except Exception:
-        return parsed
+    from bot.services.voxlink_service import lookup_phone
 
-    if not info:
-        return parsed
+    async def _lookup(p):
+        try:
+            return await lookup_phone(p)
+        except Exception:
+            return None
 
-    operator = info.get("operator")
-    region = info.get("region")
+    # ── основной номер (как раньше) ──
+    if not (extra.get("operator") and extra.get("region")):
+        info = await _lookup(phone)
+        if info:
+            if info.get("operator") and not extra.get("operator"):
+                extra["operator"] = info["operator"]
+            if info.get("region") and not extra.get("region"):
+                extra["region"] = info["region"]
+            if info.get("old_operator") and not extra.get("old_operator"):
+                extra["old_operator"] = info["old_operator"]
 
-    if operator and not extra.get("operator"):
-        extra["operator"] = operator
-    if region and not extra.get("region"):
-        extra["region"] = region
+    # ── все номера — только для сауроновского dp-формата ──
+    if enrich_all:
+        from bot.parser.relative_parser import extract_all_phones
+        others = extract_all_phones(extra.get("phones_other", "")) if extra.get("phones_other") else []
+        all_nums = [phone] + [p for p in others if p != phone]
+        phones_all = []
+        for i, num in enumerate(all_nums):
+            if i == 0 and extra.get("operator"):
+                phones_all.append({"phone": num, "operator": extra.get("operator"),
+                                   "region": extra.get("region"),
+                                   "old_operator": extra.get("old_operator")})
+                continue
+            info = await _lookup(num)
+            phones_all.append({"phone": num,
+                               "operator": (info or {}).get("operator"),
+                               "region": (info or {}).get("region"),
+                               "old_operator": (info or {}).get("old_operator")})
+        extra["phones_all"] = phones_all
+        extra.pop("phones_other", None)   # переехало в phones_all
 
     parsed["extra"] = extra
     return parsed
