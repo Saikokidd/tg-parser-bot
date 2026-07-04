@@ -152,6 +152,14 @@ def confirm_military_kb() -> InlineKeyboardMarkup:
         ]
     ])
 
+def take_over_military_kb(military_id: int) -> InlineKeyboardMarkup:
+    """Кнопки для перехвата пустого лида (только pvl)."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📥 Забрать себе и заполнить",
+                              callback_data=f"mil:takeover:{military_id}")],
+        [InlineKeyboardButton(text="❌ Отменить", callback_data="mil:cancel")],
+    ])
+    
 
 def confirm_military_with_dups_kb() -> InlineKeyboardMarkup:
     """Когда есть дубли — отдельные тексты на кнопках"""

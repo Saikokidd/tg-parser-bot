@@ -2077,3 +2077,49 @@ async def mark_phone_hlr_error(phone_id: int) -> bool:
             phone_id,
         )
         return result.endswith(" 1")
+    
+    
+async def military_has_relatives(military_id: int) -> bool:
+    """True, если у лида есть хотя бы одна связка в military_relatives."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return bool(await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM military_relatives WHERE military_id = $1)",
+            military_id,
+        ))
+
+
+async def take_over_military(
+    military_id: int, new_manager_id: int, new_office: str
+) -> Optional[dict]:
+    """
+    Забрать ПУСТОЙ лид (без родственников) себе.
+    Транзакционно перепроверяет пустоту: если за это время прикрепили
+    родственника — UPDATE не сматчит строку и вернётся None (забрать нельзя).
+    Пишет аудит в extra.taken_over (прежний офис/менеджер, кто забрал, когда).
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                UPDATE persons_military pm
+                SET office = $3::text,
+                    added_by = $2::int,
+                    extra = COALESCE(pm.extra, '{}'::jsonb) || jsonb_build_object(
+                        'taken_over', jsonb_build_object(
+                            'from_office',  pm.office,
+                            'from_manager', pm.added_by,
+                            'by_manager',   $2::int,
+                            'at', to_char(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS')
+                        )
+                    )
+                WHERE pm.id = $1::int
+                  AND NOT EXISTS (
+                      SELECT 1 FROM military_relatives mr WHERE mr.military_id = pm.id
+                  )
+                RETURNING pm.id, pm.full_name, pm.birth_date, pm.office, pm.added_by
+                """,
+                military_id, new_manager_id, new_office,
+            )
+    return dict(row) if row else None

@@ -22,6 +22,7 @@ from bot.parser.military_parser import (
 from bot.db.queries import (
     list_military_by_manager,
     find_military_global_dup, insert_military_v2,
+    military_has_relatives, take_over_military,
     update_military_extra_field,
     # sources
     list_sources_by_manager, count_sources_by_manager,
@@ -30,6 +31,7 @@ from bot.db.queries import (
 )
 from bot.keyboards.menus import (
     confirm_military_with_dups_kb,
+    take_over_military_kb,
     source_pick_kb,
 )
 
@@ -110,6 +112,25 @@ async def receive_template(message: Message, state: FSMContext, manager: dict):
         dup_office = dup.get('office')
         my_office = manager.get('office')
 
+        # pvl может ЗАБРАТЬ пустой лид (без родственников) ЛЮБОГО офиса — перехват.
+        if my_office == 'pvl' and not await military_has_relatives(dup['id']):
+            await state.update_data(
+                parsed=parsed,
+                manager_id=manager['id'],
+                manager_office=my_office,
+                takeover_military_id=dup['id'],
+            )
+            await state.set_state(MilitaryStates.waiting_dup_decision)
+            dup_text = format_military_record(dup)
+            await status_msg.edit_text(
+                f"⚠️ *Этот погибший уже в базе, но без родственников* "
+                f"(офис: {dup_office or '—'}).\n\n{dup_text}\n\n"
+                f"Можно забрать его себе и заполнить.",
+                parse_mode="Markdown",
+                reply_markup=take_over_military_kb(dup['id']),
+            )
+            return
+
         # Дубль из чужого офиса (и наш офис известен и не совпадает) — жёсткий отказ.
         # Если office_dup или my_office == None — считаем "своим" (исторические записи / не назначен).
         if dup_office and my_office and dup_office != my_office:
@@ -167,7 +188,58 @@ async def cancel_save_with_dup(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("❌ Запись отменена.")
 
 
-# ──────────── ОБЩАЯ ЛОГИКА: сохранение + пробив ────────────
+@router.callback_query(F.data.startswith("mil:takeover:"))
+async def take_over_military_lead(callback: CallbackQuery, state: FSMContext, manager: dict):
+    """📥 Перехват пустого лида (только pvl): забрать себе и сразу к пробиву.
+    Не зависит от FSM-state — id берём из callback_data, менеджера из middleware."""
+    import logging; logging.getLogger("takeover").warning("TAKEOVER FIRED: data=%r manager=%r", callback.data, bool(manager))
+    if not manager or manager.get("office") != "pvl":
+        await callback.answer("Действие доступно только офису pvl.", show_alert=True)
+        return
+    await callback.answer()
+
+    try:
+        mil_id = int(callback.data.split(":")[2])
+    except (IndexError, ValueError):
+        return
+    manager_id = manager["id"]
+
+    # Транзакционный забор с перепроверкой пустоты (защита от гонки).
+    try:
+        taken = await take_over_military(mil_id, manager_id, "pvl")
+    except Exception:
+        logging.getLogger("takeover").exception("take_over_military FAILED mil_id=%s", mil_id)
+        await callback.message.answer("Ошибка при заборе — см. логи.")
+        return
+    if not taken:
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await callback.message.answer(
+            "⛔ Не получилось забрать: за это время лид заполнили или забрали. Начните заново."
+        )
+        return
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    # Впрыгиваем в обычный поток пробива по забранному лиду,
+    # минуя доп-инфу и источник (Q5). saved_office='pvl' — счёт Sauron забравшего.
+    await state.update_data(
+        saved_full_name=taken["full_name"],
+        saved_birth_date=taken.get("birth_date"),
+        saved_military_id=taken["id"],
+        saved_manager_id=manager_id,
+        saved_office="pvl",
+    )
+    await callback.message.answer(
+        f"📥 Погибший {taken['full_name']} закреплён за вами. Запускаю пробив..."
+    )
+    await _continue_to_probit(callback.message, state)
+
 
 async def _save_and_probit(target: Message, state: FSMContext, parsed: dict,
                             manager_id: int, manager_office: str | None):
