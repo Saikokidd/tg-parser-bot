@@ -2087,6 +2087,16 @@ async def military_has_relatives(military_id: int) -> bool:
             "SELECT EXISTS(SELECT 1 FROM military_relatives WHERE military_id = $1)",
             military_id,
         ))
+        
+        
+async def military_was_taken_over(military_id: int) -> bool:
+    """True, если лид уже когда-либо забирали (есть маркер extra.taken_over)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return bool(await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM persons_military WHERE id = $1 AND extra ? 'taken_over')",
+            military_id,
+        ))
 
 
 async def take_over_military(
@@ -2106,15 +2116,18 @@ async def take_over_military(
                 UPDATE persons_military pm
                 SET office = $3::text,
                     added_by = $2::int,
+                    created_at = NOW(),
                     extra = COALESCE(pm.extra, '{}'::jsonb) || jsonb_build_object(
                         'taken_over', jsonb_build_object(
                             'from_office',  pm.office,
                             'from_manager', pm.added_by,
                             'by_manager',   $2::int,
+                            'orig_created', to_char(pm.created_at, 'YYYY-MM-DD"T"HH24:MI:SS'),
                             'at', to_char(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS')
                         )
                     )
                 WHERE pm.id = $1::int
+                  AND NOT (pm.extra ? 'taken_over')
                   AND NOT EXISTS (
                       SELECT 1 FROM military_relatives mr WHERE mr.military_id = pm.id
                   )

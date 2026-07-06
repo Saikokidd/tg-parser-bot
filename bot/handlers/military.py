@@ -22,7 +22,7 @@ from bot.parser.military_parser import (
 from bot.db.queries import (
     list_military_by_manager,
     find_military_global_dup, insert_military_v2,
-    military_has_relatives, take_over_military,
+    military_has_relatives, take_over_military, military_was_taken_over,
     update_military_extra_field,
     # sources
     list_sources_by_manager, count_sources_by_manager,
@@ -114,6 +114,15 @@ async def receive_template(message: Message, state: FSMContext, manager: dict):
 
         # pvl может ЗАБРАТЬ пустой лид (без родственников) ЛЮБОГО офиса — перехват.
         if my_office == 'pvl' and not await military_has_relatives(dup['id']):
+            # Забрать можно только ОДИН раз за всё время — иначе пустые лиды
+            # крутились бы по кругу между менеджерами.
+            if await military_was_taken_over(dup['id']):
+                await state.clear()
+                await status_msg.edit_text(
+                    "⛔ Этот погибший уже забирался ранее, родственники не найдены.\n"
+                    "Повторный забор недоступен."
+                )
+                return
             await state.update_data(
                 parsed=parsed,
                 manager_id=manager['id'],
@@ -192,7 +201,6 @@ async def cancel_save_with_dup(callback: CallbackQuery, state: FSMContext):
 async def take_over_military_lead(callback: CallbackQuery, state: FSMContext, manager: dict):
     """📥 Перехват пустого лида (только pvl): забрать себе и сразу к пробиву.
     Не зависит от FSM-state — id берём из callback_data, менеджера из middleware."""
-    import logging; logging.getLogger("takeover").warning("TAKEOVER FIRED: data=%r manager=%r", callback.data, bool(manager))
     if not manager or manager.get("office") != "pvl":
         await callback.answer("Действие доступно только офису pvl.", show_alert=True)
         return
