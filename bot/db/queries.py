@@ -2136,3 +2136,138 @@ async def take_over_military(
                 military_id, new_manager_id, new_office,
             )
     return dict(row) if row else None
+
+
+async def autofeed_preview(min_days: int = 3, max_days: int = 10, donor_min: int = 20) -> list:
+    """
+    READ-ONLY. По донорам dp/ha — сколько заполненных невыгруженных лидов
+    в окне [min_days, max_days] дней. Ничего не меняет.
+    Донор пригоден, если eligible_in_window > donor_min.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT pm.office,
+                   pm.added_by,
+                   COALESCE(m.name, '—') AS manager,
+                   COUNT(*) AS eligible_in_window
+            FROM persons_military pm
+            LEFT JOIN managers m ON m.id = pm.added_by
+            WHERE pm.office IN ('dp','ha')
+              AND pm.exported_at IS NULL
+              AND pm.created_at <= NOW() - make_interval(days => $1::int)
+              AND pm.created_at >= NOW() - make_interval(days => $2::int)
+              AND EXISTS (SELECT 1 FROM military_relatives mr WHERE mr.military_id = pm.id)
+            GROUP BY pm.office, pm.added_by, m.name
+            ORDER BY eligible_in_window DESC
+            """,
+            min_days, max_days,
+        )
+    return [dict(r) for r in rows]
+
+
+async def autofeed_pick_and_move(target_manager: int = 111, min_days: int = 3,
+                                 max_days: int = 10, donor_min: int = 20) -> dict:
+    """
+    Атомарно берёт ОДИН подходящий лид (старейший в окне; донор с eligible > donor_min)
+    и переносит target_manager (Соня): office='pvl', created_at=NOW(), маркер extra.autofed.
+    Возвращает перенесённый лид или None. Дневной лимит/время НЕ проверяет — это цикл.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                UPDATE persons_military
+                SET added_by = $1::int,
+                    office = 'pvl',
+                    created_at = NOW(),
+                    extra = COALESCE(extra, '{}'::jsonb) || jsonb_build_object(
+                              'autofed', jsonb_build_object(
+                                 'from_office',  office,
+                                 'from_manager', added_by,
+                                 'orig_created', to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS'),
+                                 'at', to_char(NOW(), 'YYYY-MM-DD"T"HH24:MI:SSOF')))
+                WHERE id = (
+                    WITH elig AS (
+                      SELECT pm.id, pm.created_at,
+                             COUNT(*) OVER (PARTITION BY pm.added_by) AS donor_cnt
+                      FROM persons_military pm
+                      WHERE pm.office IN ('dp','ha')
+                        AND pm.exported_at IS NULL
+                        AND pm.created_at <= NOW() - make_interval(days => $2::int)
+                        AND pm.created_at >= NOW() - make_interval(days => $3::int)
+                        AND EXISTS (SELECT 1 FROM military_relatives mr WHERE mr.military_id = pm.id)
+                    )
+                    SELECT id FROM elig WHERE donor_cnt > $4::int
+                    ORDER BY created_at ASC
+                    LIMIT 1
+                )
+                RETURNING id, full_name,
+                          extra->'autofed'->>'from_office'  AS from_office,
+                          extra->'autofed'->>'from_manager' AS from_manager,
+                          extra->'autofed'->>'orig_created' AS orig_created
+                """,
+                target_manager, min_days, max_days, donor_min,
+            )
+    return dict(row) if row else None
+
+
+async def autofeed_today_count(target_manager: int = 111) -> int:
+    """
+    Сколько лидов уже автоподано target_manager СЕГОДНЯ по дню Киева.
+    Считаем по маркеру extra.autofed.at (в нём offset, поэтому ::timestamptz корректен).
+    Переживает рестарты бота — счётчик берётся из БД, а не из памяти процесса.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        val = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM persons_military
+            WHERE added_by = $1::int
+              AND extra ? 'autofed'
+              AND (extra->'autofed'->>'at')::timestamptz
+                    >= date_trunc('day', NOW() AT TIME ZONE 'Europe/Kyiv') AT TIME ZONE 'Europe/Kyiv'
+            """,
+            target_manager,
+        )
+        return val or 0
+    
+    
+async def autofeed_window_now() -> dict:
+    """
+    Текущее время по Киеву + флаг, попадаем ли в рабочее окно автоподачи.
+    Окно: с 09:00 до 18:00 по Киеву. Ничего не меняет.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+              (NOW() AT TIME ZONE 'Europe/Kyiv')                       AS kyiv_now,
+              EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'Europe/Kyiv'))::int AS kyiv_hour,
+              (EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'Europe/Kyiv')) >= 9
+               AND EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'Europe/Kyiv')) < 18) AS in_window
+            """
+        )
+    return dict(row)
+
+
+async def autofeed_should_run(target_manager: int = 111, daily_limit: int = 30) -> dict:
+    """
+    Единая проверка «можно ли сейчас перенести один лид».
+    Возвращает {allowed: bool, reason: str, today: int, limit: int, kyiv_hour: int}.
+    БД не меняет — только читает.
+    """
+    win = await autofeed_window_now()
+    today = await autofeed_today_count(target_manager)
+    if not win["in_window"]:
+        allowed, reason = False, f"вне окна 09:00–18:00 Киев (сейчас {win['kyiv_hour']}ч)"
+    elif today >= daily_limit:
+        allowed, reason = False, f"дневной лимit достигнут ({today}/{daily_limit})"
+    else:
+        allowed, reason = True, f"ок ({today}/{daily_limit}, {win['kyiv_hour']}ч Киев)"
+    return {"allowed": allowed, "reason": reason,
+            "today": today, "limit": daily_limit, "kyiv_hour": win["kyiv_hour"]}

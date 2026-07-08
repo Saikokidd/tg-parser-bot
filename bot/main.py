@@ -23,6 +23,7 @@ from bot.utils.logging_config import setup_logging
 from bot.services.voxlink_enricher import enricher_loop as voxlink_enricher_loop
 from bot.services.hlr_enricher import enricher_loop as hlr_enricher_loop
 from bot.services.hlr_poller import poller_loop as hlr_poller_loop
+from bot.services.sonya_autofeed import autofeed_loop as sonya_autofeed_loop
 from bot.api_server import start_api_server
 
 setup_logging()
@@ -75,6 +76,9 @@ async def main():
     hlr_poller_task = asyncio.create_task(hlr_poller_loop())
     logger.info("hlr_poller started in background")
 
+    sonya_autofeed_task = asyncio.create_task(sonya_autofeed_loop())
+    logger.info("sonya_autofeed task created")
+
     # HTTP API сервер для внешних агентов (например ha CRM)
     api_runner = None
     api_port_env = os.getenv("API_PORT")
@@ -92,9 +96,9 @@ async def main():
         if api_runner is not None:
             await api_runner.cleanup()
             logger.info("api: stopped")
-        for task in (voxlink_task, hlr_enricher_task, hlr_poller_task):
+        for task in (voxlink_task, hlr_enricher_task, hlr_poller_task, sonya_autofeed_task):
             task.cancel()
-        for task in (voxlink_task, hlr_enricher_task, hlr_poller_task):
+        for task in (voxlink_task, hlr_enricher_task, hlr_poller_task, sonya_autofeed_task):
             try:
                 await task
             except asyncio.CancelledError:
