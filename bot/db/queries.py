@@ -567,7 +567,7 @@ async def fetch_military_for_export(manager_id: int = None, limit: int = None) -
             LEFT JOIN managers m ON pm.added_by = m.id
             LEFT JOIN sources s ON s.id = pm.source_id
             WHERE {' AND '.join(where)}
-            ORDER BY pm.created_at ASC
+            ORDER BY pm.created_at DESC
         """
         if limit:
             sql += f" LIMIT ${len(params) + 1}"
