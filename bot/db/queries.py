@@ -1922,6 +1922,8 @@ async def phones_pending_voxlink(limit: int = 200) -> list[dict]:
             SELECT id, phone, relative_id
             FROM relative_phones
             WHERE operator IS NULL
+              AND (operator_checked_at IS NULL
+                   OR operator_checked_at < NOW() - INTERVAL '7 days')
             ORDER BY id ASC
             LIMIT $1
             """,
