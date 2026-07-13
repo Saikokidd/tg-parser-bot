@@ -2169,6 +2169,10 @@ async def autofeed_preview(min_days: int = 3, max_days: int = 10, donor_min: int
     return [dict(r) for r in rows]
 
 
+# Менеджеры, у которых НЕЛЬЗЯ забирать в автоподачу (некачественная работа)
+AUTOFEED_EXCLUDE_MANAGERS = [7]   # Ваня2 (dp)
+
+
 async def autofeed_pick_and_move(target_manager: int = 111, min_days: int = 3,
                                  max_days: int = 10, donor_min: int = 20) -> dict:
     """
@@ -2197,6 +2201,7 @@ async def autofeed_pick_and_move(target_manager: int = 111, min_days: int = 3,
                              COUNT(*) OVER (PARTITION BY pm.added_by) AS donor_cnt
                       FROM persons_military pm
                       WHERE pm.office IN ('dp','ha')
+                        AND pm.added_by <> ALL($5::int[])
                         AND pm.exported_at IS NULL
                         AND pm.created_at <= NOW() - make_interval(days => $2::int)
                         AND pm.created_at >= NOW() - make_interval(days => $3::int)
@@ -2211,7 +2216,7 @@ async def autofeed_pick_and_move(target_manager: int = 111, min_days: int = 3,
                           extra->'autofed'->>'from_manager' AS from_manager,
                           extra->'autofed'->>'orig_created' AS orig_created
                 """,
-                target_manager, min_days, max_days, donor_min,
+                target_manager, min_days, max_days, donor_min, AUTOFEED_EXCLUDE_MANAGERS,
             )
     return dict(row) if row else None
 
