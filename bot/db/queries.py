@@ -1002,23 +1002,29 @@ async def find_relative_global_dup(
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT r.id, r.full_name, r.birth_date, r.phone, r.address,
-                   r.office, r.added_by, m.name AS manager_name,
-                   (
-                       (CASE WHEN $1::text IS NOT NULL AND LOWER(r.full_name) = LOWER($1) THEN 1 ELSE 0 END) +
-                       (CASE WHEN $2::date IS NOT NULL AND r.birth_date = $2 THEN 1 ELSE 0 END) +
-                       (CASE WHEN $3::text IS NOT NULL AND r.phone = $3 THEN 1 ELSE 0 END) +
-                       (CASE WHEN $4::text IS NOT NULL AND LOWER(r.address) = LOWER($4) THEN 1 ELSE 0 END)
-                   ) AS match_count
-            FROM relatives r
-            LEFT JOIN managers m ON m.id = r.added_by
-            WHERE (
-                (CASE WHEN $1::text IS NOT NULL AND LOWER(r.full_name) = LOWER($1) THEN 1 ELSE 0 END) +
-                (CASE WHEN $2::date IS NOT NULL AND r.birth_date = $2 THEN 1 ELSE 0 END) +
-                (CASE WHEN $3::text IS NOT NULL AND r.phone = $3 THEN 1 ELSE 0 END) +
-                (CASE WHEN $4::text IS NOT NULL AND LOWER(r.address) = LOWER($4) THEN 1 ELSE 0 END)
-            ) >= 2
-            ORDER BY match_count DESC, r.created_at ASC
+            WITH cand AS (
+                SELECT r.id, r.full_name, r.birth_date, r.phone, r.address,
+                       r.office, r.added_by, r.created_at,
+                       (
+                           (CASE WHEN LOWER(r.full_name) = LOWER($1) THEN 1 ELSE 0 END) +
+                           (CASE WHEN r.birth_date = $2 THEN 1 ELSE 0 END) +
+                           (CASE WHEN r.phone = $3 THEN 1 ELSE 0 END) +
+                           (CASE WHEN LOWER(r.address) = LOWER($4) THEN 1 ELSE 0 END)
+                       ) AS match_count
+                FROM relatives r
+                -- Предфильтр по индексируемым полям: любые 2 совпадения из 4
+                -- обязательно включают хотя бы одно из этих трёх (адрес один,
+                -- сам с собой пару не составит), поэтому кандидатов не теряем.
+                WHERE LOWER(r.full_name) = LOWER($1)
+                   OR r.birth_date = $2
+                   OR r.phone = $3
+            )
+            SELECT c.id, c.full_name, c.birth_date, c.phone, c.address,
+                   c.office, c.added_by, m.name AS manager_name, c.match_count
+            FROM cand c
+            LEFT JOIN managers m ON m.id = c.added_by
+            WHERE c.match_count >= 2
+            ORDER BY c.match_count DESC, c.created_at ASC
             LIMIT 1
             """,
             full_name, birth_date, phone, address
