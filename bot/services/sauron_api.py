@@ -9,6 +9,7 @@
 Стоимость одного запроса по статистике ~0.02 ₽.
 """
 import os
+import asyncio
 import logging
 from typing import Optional
 import aiohttp
@@ -20,6 +21,13 @@ logger = logging.getLogger(__name__)
 
 API_BASE = "https://api.sauron.info/v1/query/get"
 TIMEOUT_SEC = 60
+
+# Ретраи для транзиентных сбоев на стороне Sauron (их 5xx/HTML вместо JSON,
+# code=1004 Remote server error, сетевые таймауты). Ошибки авторизации,
+# баланса и логики не ретраятся — они не пройдут и со второй попытки.
+RETRY_ATTEMPTS = 3
+RETRY_DELAY_SEC = 2
+TRANSIENT_CODES = {1004}
 
 # ──────────── Выбор токена по офису ────────────
 
@@ -91,28 +99,45 @@ async def _post(endpoint: str, payload: dict, office: str | None = None) -> dict
     url = f"{API_BASE}/{endpoint}"
 
     timeout = aiohttp.ClientTimeout(total=TIMEOUT_SEC)
-    try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(url, data=payload) as resp:
-                data = await resp.json()
-    except aiohttp.ClientError as e:
-        raise SauronError(f"Сетевая ошибка: {e}") from e
-    except Exception as e:
-        raise SauronError(f"Ошибка запроса: {e}") from e
+    last_err: Exception | None = None
 
-    # Разбор ответа
-    if not data.get("ok"):
-        code = data.get("error_code")
-        desc = data.get("description", "Неизвестная ошибка")
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        data = None
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, data=payload) as resp:
+                    data = await resp.json()
+        except aiohttp.ClientError as e:
+            last_err = SauronError(f"Сетевая ошибка: {e}")
+        except Exception as e:
+            # Сюда же попадает 'unexpected mimetype: text/html' — их сервер
+            # отдал HTML-страницу ошибки вместо JSON.
+            last_err = SauronError(f"Ошибка запроса: {e}")
 
-        if code == 401:
-            raise SauronAuthError(f"Авторизация не пройдена: {desc}")
-        if "balance" in desc.lower() or code == 402:
-            raise SauronBalanceError(f"Недостаточно средств: {desc}")
+        if data is not None:
+            if data.get("ok"):
+                return data.get("result", {})
 
-        raise SauronError(f"API вернул ошибку (code={code}): {desc}")
+            code = data.get("error_code")
+            desc = data.get("description", "Неизвестная ошибка")
 
-    return data.get("result", {})
+            if code == 401:
+                raise SauronAuthError(f"Авторизация не пройдена: {desc}")
+            if "balance" in desc.lower() or code == 402:
+                raise SauronBalanceError(f"Недостаточно средств: {desc}")
+            if code not in TRANSIENT_CODES:
+                raise SauronError(f"API вернул ошибку (code={code}): {desc}")
+
+            last_err = SauronError(f"API вернул ошибку (code={code}): {desc}")
+
+        if attempt < RETRY_ATTEMPTS:
+            logger.warning(
+                "Sauron: попытка %s/%s не удалась (%s) — повтор через %sс",
+                attempt, RETRY_ATTEMPTS, last_err, RETRY_DELAY_SEC * attempt,
+            )
+            await asyncio.sleep(RETRY_DELAY_SEC * attempt)
+
+    raise last_err
 
 
 # ──────────── Публичные методы ────────────
