@@ -68,7 +68,7 @@ RELATIVE_COLUMNS = [
 
 # ──────────── Помощники форматирования ────────────
 
-STD_EXTRA_KEYS_RELATIVE = {"snils", "inn", "passport", "email", "emails", "operator", "region", "phones_all", "old_operator"}
+STD_EXTRA_KEYS_RELATIVE = {"snils", "inn", "passport", "email", "emails", "operator", "region", "phones_all", "old_operator", "tz_offset"}
 STD_EXTRA_KEYS_MILITARY = {"unit", "callsign", "note", "source"}
 
 
@@ -256,7 +256,9 @@ def build_xlsx(military_records: list, relatives: list,
             _fmt_date(r.get("birth_date")),
             r.get("address") or "",
             phones_text,
-            extra.get("region") or "",
+            (f"{extra.get('region')} ({extra.get('tz_offset')})"
+             if extra.get("region") and extra.get("tz_offset")
+             else (extra.get("region") or "")),
             extra.get("snils") or "",
             extra.get("inn") or "",
             extra.get("passport") or "",

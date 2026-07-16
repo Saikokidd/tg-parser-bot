@@ -81,6 +81,8 @@ async def _update_with_info(rel_id: int, current_extra: dict, info: dict) -> Non
         new_extra["operator"] = info["operator"]
     if info.get("region"):
         new_extra["region"] = info["region"]
+    if info.get("tz_offset"):
+        new_extra["tz_offset"] = info["tz_offset"]
     if info.get("old_operator"):
         new_extra["old_operator"] = info["old_operator"]
     # Сбрасываем счётчик попыток если был

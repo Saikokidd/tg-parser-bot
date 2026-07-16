@@ -492,6 +492,8 @@ async def _enrich_with_voxlink(parsed: dict) -> dict:
                 extra["operator"] = info["operator"]
             if info.get("region") and not extra.get("region"):
                 extra["region"] = info["region"]
+            if info.get("tz_offset") and not extra.get("tz_offset"):
+                extra["tz_offset"] = info["tz_offset"]
             if info.get("old_operator") and not extra.get("old_operator"):
                 extra["old_operator"] = info["old_operator"]
 

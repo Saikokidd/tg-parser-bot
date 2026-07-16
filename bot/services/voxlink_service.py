@@ -11,6 +11,7 @@ import logging
 import time
 import aiohttp
 import asyncio
+from bot.services.tz_regions import region_to_msk_offset
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +168,7 @@ async def lookup_phone(phone: str) -> dict | None:
     return {
         "operator": operator,
         "region": region,
+        "tz_offset": region_to_msk_offset(region),
         "old_operator": data.get("old_operator"),
     }
 
