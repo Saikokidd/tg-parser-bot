@@ -70,11 +70,16 @@ async def main():
     voxlink_task = asyncio.create_task(voxlink_enricher_loop())
     logger.info("voxlink_enricher started in background")
 
-    hlr_enricher_task = asyncio.create_task(hlr_enricher_loop())
-    logger.info("hlr_enricher started in background")
-
-    hlr_poller_task = asyncio.create_task(hlr_poller_loop())
-    logger.info("hlr_poller started in background")
+    # HLR (smsaero) — за флагом HLR_ENABLED. Выключен: задачи не стартуют,
+    # значки статуса в выгрузке не показываются (см. export_service).
+    hlr_tasks = []
+    if os.getenv("HLR_ENABLED", "").strip().lower() in ("1", "true", "yes", "on"):
+        hlr_tasks.append(asyncio.create_task(hlr_enricher_loop()))
+        logger.info("hlr_enricher started in background")
+        hlr_tasks.append(asyncio.create_task(hlr_poller_loop()))
+        logger.info("hlr_poller started in background")
+    else:
+        logger.info("HLR отключён (HLR_ENABLED не задан) — enricher/poller не запущены")
 
     sonya_autofeed_task = asyncio.create_task(sonya_autofeed_loop())
     logger.info("sonya_autofeed task created")
@@ -96,9 +101,9 @@ async def main():
         if api_runner is not None:
             await api_runner.cleanup()
             logger.info("api: stopped")
-        for task in (voxlink_task, hlr_enricher_task, hlr_poller_task, sonya_autofeed_task):
+        for task in [voxlink_task, sonya_autofeed_task, *hlr_tasks]:
             task.cancel()
-        for task in (voxlink_task, hlr_enricher_task, hlr_poller_task, sonya_autofeed_task):
+        for task in [voxlink_task, sonya_autofeed_task, *hlr_tasks]:
             try:
                 await task
             except asyncio.CancelledError:

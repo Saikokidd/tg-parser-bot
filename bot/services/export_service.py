@@ -8,6 +8,7 @@
 Используется openpyxl.
 """
 import io
+import os
 import re
 import logging
 from datetime import datetime
@@ -101,6 +102,11 @@ def _fmt_dt(dt):
     return str(dt)
 
 
+def _hlr_enabled() -> bool:
+    """HLR-сервис (smsaero) включён? Если нет — значки статуса в выгрузке не показываем."""
+    return os.getenv("HLR_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 # Маппинг hlr_status → emoji + текст
 HLR_STATUS_LABELS = {
     "available":         "✅",
@@ -136,7 +142,7 @@ def _fmt_phones(phones: list[dict], legacy_phone: str | None,
             phone = p.get("phone") or ""
             op = _fmt_op(p.get("operator"), p.get("old_operator"))
             status_key = p.get("hlr_status") or ""
-            label = HLR_STATUS_LABELS.get(status_key, "")
+            label = HLR_STATUS_LABELS.get(status_key, "") if _hlr_enabled() else ""
             line = f"{phone} ({op})"
             if label:
                 line = f"{line} {label}"
