@@ -8,6 +8,7 @@
 Используется openpyxl.
 """
 import io
+import re
 import logging
 from datetime import datetime
 from openpyxl import Workbook
@@ -17,6 +18,18 @@ from openpyxl.utils import get_column_letter
 from bot.parser.military_parser import status_label
 
 logger = logging.getLogger(__name__)
+
+# openpyxl падает с IllegalCharacterError, если в строке есть управляющие
+# символы (приходят из внешних источников — Sauron, ручной ввод).
+# Тот же диапазон, что openpyxl.cell.cell.ILLEGAL_CHARACTERS_RE.
+_ILLEGAL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _clean_cell(value):
+    """Убрать управляющие символы из строкового значения ячейки."""
+    if isinstance(value, str) and _ILLEGAL_CHARS_RE.search(value):
+        return _ILLEGAL_CHARS_RE.sub(" ", value)
+    return value
 
 
 # ──────────── Стили ────────────
@@ -268,7 +281,7 @@ def build_xlsx(military_records: list, relatives: list,
         ]
 
         for col_idx, value in enumerate(row, start=1):
-            cell = ws_rel.cell(row=r_idx, column=col_idx, value=value)
+            cell = ws_rel.cell(row=r_idx, column=col_idx, value=_clean_cell(value))
             _apply_cell_style(cell)
 
         # Гиперссылка на ячейку "Закреплён за" — на ПЕРВОГО военного в списке (который в выгрузке)
@@ -298,7 +311,7 @@ def build_xlsx(military_records: list, relatives: list,
         ]
 
         for col_idx, value in enumerate(row, start=1):
-            cell = ws_mil.cell(row=m_idx, column=col_idx, value=value)
+            cell = ws_mil.cell(row=m_idx, column=col_idx, value=_clean_cell(value))
             _apply_cell_style(cell)
 
     # ──────────── Сохраняем в bytes ────────────
