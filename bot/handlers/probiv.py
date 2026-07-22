@@ -15,6 +15,7 @@ from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 
+from bot.services.voxlink_service import lookup_phone
 from bot.services.probiv_service import (
     probit_person, format_probiv_result, ProbivResult
 )
@@ -424,10 +425,12 @@ async def _save_relative_phones_from_template(
         return 0
 
 
-def _build_relative_data_from_template(template: dict) -> dict:
+async def _build_relative_data_from_template(template: dict) -> dict:
     """
     Преобразовать шаблон из Sauron в формат данных для insert_relative_v2.
     Извлекает все доступные поля + кладёт обогащение (operator, region) в extra.
+    Оператор/регион определяются СИНХРОННО через voxlink здесь, чтобы менеджер
+    видел их сразу в шаблоне (фоновый enricher остаётся как подстраховка).
     """
     # birth_date_str → date
     from datetime import date as _date
@@ -453,10 +456,27 @@ def _build_relative_data_from_template(template: dict) -> dict:
     elif template.get("email"):
         extra["email"] = template["email"]
 
+    phone = normalize_phone(template.get("phone"))
+
+    # Синхронное обогащение voxlink — чтобы оператор/регион были сразу в шаблоне.
+    # Если оператора ещё нет в extra и есть телефон — спрашиваем voxlink.
+    if phone and not extra.get("operator"):
+        try:
+            info = await lookup_phone(phone)
+            if info:
+                if info.get("operator"):
+                    extra["operator"] = info["operator"]
+                if info.get("region"):
+                    extra["region"] = info["region"]
+                if info.get("tz_offset"):
+                    extra["tz_offset"] = info["tz_offset"]
+        except Exception:
+            pass  # voxlink недоступен — фоновый enricher добьёт позже
+
     return {
         "full_name": template.get("full_name"),
         "birth_date": birth_date,
-        "phone": normalize_phone(template.get("phone")),
+        "phone": phone,
         "address": template.get("address"),
         "extra": extra,
     }
@@ -518,7 +538,7 @@ async def attach_do(callback: CallbackQuery, state: FSMContext, manager: dict):
         return
     manager_id, military_id, template = ctx
 
-    relative_data = _build_relative_data_from_template(template)
+    relative_data = await _build_relative_data_from_template(template)
 
     # Глобальный дубль-чек (этап B1): если дубль из чужого офиса — жёсткий отказ
     my_office = manager.get("office") if manager else None
@@ -608,7 +628,7 @@ async def attach_dup_new(callback: CallbackQuery, state: FSMContext, manager: di
         return
     manager_id, military_id, template = ctx
 
-    relative_data = _build_relative_data_from_template(template)
+    relative_data = await _build_relative_data_from_template(template)
     rel = await insert_relative_v2(relative_data, manager_id)
     await link_military_relative(military_id, rel["id"], manager_id)
     await _save_relative_phones_from_template(
