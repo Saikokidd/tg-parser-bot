@@ -12,6 +12,7 @@
 - Админ → выгружает ВСЕХ менеджеров (для теста)
 - Пульт → нет доступа
 """
+import asyncio
 import logging
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -151,7 +152,12 @@ async def _do_export(target: Message, manager: dict | None, is_admin: bool, limi
 
     # Генерируем файл
     try:
-        xlsx_bytes = build_xlsx(military_records, relatives, manager_label=label)
+        # Генерация xlsx синхронная (openpyxl) и на больших выгрузках занимает
+        # десятки секунд — уносим в отдельный поток, иначе блокируется весь
+        # event loop и у остальных менеджеров бот «висит».
+        xlsx_bytes = await asyncio.to_thread(
+            build_xlsx, military_records, relatives, manager_label=label
+        )
     except Exception as e:
         logger.exception("Ошибка генерации xlsx")
         await status_msg.edit_text(f"❌ Ошибка при генерации файла: {e}")
