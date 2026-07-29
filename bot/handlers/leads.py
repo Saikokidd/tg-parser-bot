@@ -463,7 +463,6 @@ async def relative_edit_menu(callback: CallbackQuery, manager: dict | None = Non
     if not _can_access_military(military, role, office, manager_id):
         await callback.answer("Запись недоступна.", show_alert=True)
         return
-
     relative = await get_relative_by_id(relative_id)
     if not relative:
         await callback.answer("Запись не найдена.", show_alert=True)
@@ -474,7 +473,7 @@ async def relative_edit_menu(callback: CallbackQuery, manager: dict | None = Non
     birth_str = birth.strftime('%d.%m.%Y') if birth else '—'
 
     lines = [
-        f"*Редактирование:* {relative['full_name']}\n",
+        f"Редактирование: {relative['full_name']}\n",
         f"ФИО: {relative.get('full_name') or '—'}",
         f"ДР: {birth_str}",
         f"Телефон: {fmt_phones_full(relative.get('phones') or [], relative.get('phone'), extra.get('operator')) or '—'}",
@@ -487,7 +486,7 @@ async def relative_edit_menu(callback: CallbackQuery, manager: dict | None = Non
     std_keys = {'snils', 'inn', 'passport', 'email'}
     custom = [(k, v) for k, v in extra.items() if k not in std_keys]
     if custom:
-        lines.append("\n_Свои поля:_")
+        lines.append("\nСвои поля:")
         for k, v in custom:
             lines.append(f"{k}: {v}")
 
@@ -496,7 +495,6 @@ async def relative_edit_menu(callback: CallbackQuery, manager: dict | None = Non
     await callback.answer()
     await callback.message.edit_text(
         "\n".join(lines),
-        parse_mode="Markdown",
         reply_markup=edit_relative_fields_kb(relative_id, military_id)
     )
 
