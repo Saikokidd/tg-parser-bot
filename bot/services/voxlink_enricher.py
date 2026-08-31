@@ -11,7 +11,7 @@ from pathlib import Path
 
 from bot.db.connection import get_pool
 from bot.db.queries import phones_pending_voxlink, update_phone_operator
-from bot.services.voxlink_service import lookup_phone, VoxlinkTransientError
+from bot.services.mvpsoll_service import lookup_phone, lookup_phones_batch, VoxlinkTransientError
 
 # ──────────── Настройки ────────────
 
@@ -22,7 +22,7 @@ INTERVAL_SECONDS = 10 * 60  # 10 минут
 MAX_ATTEMPTS = 2
 
 # Сколько номеров обрабатываем за один прогон (чтобы не висеть в БД часами)
-BATCH_LIMIT = 200
+BATCH_LIMIT = 300
 
 # Параллельность запросов
 PARALLEL = 3
@@ -153,7 +153,13 @@ async def _process_one(rel: dict, stats: dict, sem: asyncio.Semaphore):
 
 
 async def run_once() -> dict:
-    """Один прогон обогащения. Возвращает статистику."""
+    """
+    Один прогон обогащения через mvpsoll (батч до 1000 за запрос).
+    Берём кандидатов, собираем телефоны, бьём ОДНИМ батч-запросом,
+    затем раскладываем результаты: найден оператор → update,
+    не найден → bump_attempts (реальная попытка),
+    транзиентная ошибка на весь батч → не считаем попытки (повтор позже).
+    """
     candidates = await _fetch_candidates(BATCH_LIMIT)
     if not candidates:
         return {"candidates": 0}
@@ -164,10 +170,44 @@ async def run_once() -> dict:
         "not_found_yet": 0,
         "marked_skipped": 0,
         "errors": 0,
+        "transient": 0,
     }
 
-    sem = asyncio.Semaphore(PARALLEL)
-    await asyncio.gather(*[_process_one(rel, stats, sem) for rel in candidates])
+    # собрать телефоны (пропустив пустые)
+    phones = [c["phone"] for c in candidates if c.get("phone")]
+    if not phones:
+        return stats
+
+    # ОДИН батч-запрос на всю пачку
+    try:
+        results = await lookup_phones_batch(phones)
+    except VoxlinkTransientError as e:
+        # весь батч не удался (5xx / таймаут / нет баланса) — попытки НЕ считаем
+        logger.info(f"батч transient ({e}) — повтор в следующем прогоне")
+        stats["transient"] = len(candidates)
+        return stats
+    except Exception as e:
+        logger.warning(f"батч ошибка lookup_phones_batch — {e}")
+        stats["errors"] = len(candidates)
+        return stats
+
+    # разложить результаты по кандидатам
+    for rel in candidates:
+        rel_id = rel["id"]
+        phone = rel["phone"]
+        extra = rel["extra"] or {}
+        info = results.get(phone)
+        if info and (info.get("operator") or info.get("region")):
+            await _update_with_info(rel_id, extra, info)
+            stats["updated"] += 1
+        else:
+            # номер не определён mvpsoll — реальная попытка
+            attempts = await _bump_attempts(rel_id, extra)
+            if attempts >= MAX_ATTEMPTS:
+                stats["marked_skipped"] += 1
+                logger.info(f"[#{rel_id}] {phone}: помечен skipped после {attempts} попыток")
+            else:
+                stats["not_found_yet"] += 1
 
     return stats
 

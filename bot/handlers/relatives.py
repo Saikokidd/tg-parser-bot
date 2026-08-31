@@ -434,7 +434,7 @@ async def _save_and_link(target: Message, state: FSMContext,
     Перед сохранением — обогащаем телефон через voxlink (оператор/регион).
     Если они уже заполнены в parsed.extra — не перезаписываем.
     """
-    parsed = await _enrich_with_voxlink(parsed)
+    # автопробив оператора убран из синхронного пути — оператора добьёт фоновый enricher
 
     # v2: автоматически проставляет office из manager.office создателя
     relative = await insert_relative_v2(parsed, manager_id)
@@ -476,7 +476,7 @@ async def _enrich_with_voxlink(parsed: dict) -> dict:
 
     extra = parsed.get("extra") or {}
 
-    from bot.services.voxlink_service import lookup_phone
+    from bot.services.mvpsoll_service import lookup_phone
 
     async def _lookup(p):
         try:

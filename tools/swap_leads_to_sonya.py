@@ -349,6 +349,15 @@ async def main(apply: bool):
                 skipped_donors.append(tp)
                 continue
             findre_leads, mc, rc = match
+            # 0 потерь: возврат должен быть >= забранного по родне И военным
+            if rc < tp["rel_count"] or mc < tp["mil_count"]:
+                logger.warning(
+                    f"Для {tp['mgr_name']} Findre вернул бы меньше "
+                    f"({mc} воен/{rc} род vs забрали {tp['mil_count']}/{tp['rel_count']}) "
+                    f"— ПРОПУСК (без потерь)"
+                )
+                skipped_donors.append(tp)
+                continue
             used_findre_ids.update(l["military_id"] for l in findre_leads)
             return_plan.append({
                 "donor_mgr_id": tp["mgr_id"],

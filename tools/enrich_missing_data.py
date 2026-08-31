@@ -30,7 +30,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from bot.db.connection import get_pool, close_pool
 from bot.services.sauron_api import query_person, split_full_name, SauronError
 from bot.db.queries import insert_probiv_log
-from bot.services.voxlink_service import lookup_phone
+from bot.services.mvpsoll_service import lookup_phone
 from bot.services.email_validator_service import validate_emails_parallel
 from bot.parser.sauron_parser import build_relative_template
 

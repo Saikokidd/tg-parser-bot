@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bot.db.connection import get_pool, close_pool
-from bot.services.voxlink_service import lookup_phone
+from bot.services.mvpsoll_service import lookup_phone
 
 logging.basicConfig(
     level=logging.INFO,

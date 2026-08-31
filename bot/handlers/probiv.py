@@ -15,7 +15,7 @@ from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 
-from bot.services.voxlink_service import lookup_phone
+from bot.services.mvpsoll_service import lookup_phone
 from bot.services.probiv_service import (
     probit_person, format_probiv_result, ProbivResult
 )
@@ -458,20 +458,8 @@ async def _build_relative_data_from_template(template: dict) -> dict:
 
     phone = normalize_phone(template.get("phone"))
 
-    # Синхронное обогащение voxlink — чтобы оператор/регион были сразу в шаблоне.
-    # Если оператора ещё нет в extra и есть телефон — спрашиваем voxlink.
-    if phone and not extra.get("operator"):
-        try:
-            info = await lookup_phone(phone)
-            if info:
-                if info.get("operator"):
-                    extra["operator"] = info["operator"]
-                if info.get("region"):
-                    extra["region"] = info["region"]
-                if info.get("tz_offset"):
-                    extra["tz_offset"] = info["tz_offset"]
-        except Exception:
-            pass  # voxlink недоступен — фоновый enricher добьёт позже
+    # Синхронный автопробив оператора убран — тормозил пробив до 40с при таймаутах API.
+    # Оператор/регион проставит фоновый enricher (батчами через mvpsoll).
 
     return {
         "full_name": template.get("full_name"),

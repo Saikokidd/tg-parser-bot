@@ -11,7 +11,7 @@ from typing import Optional
 
 from bot.services import sauron_api
 from bot.parser import sauron_parser
-from bot.services import voxlink_service, email_validator_service
+from bot.services import mvpsoll_service as voxlink_service, email_validator_service
 from bot.db.queries import insert_probiv_log, is_phone_taken
 
 logger = logging.getLogger(__name__)
