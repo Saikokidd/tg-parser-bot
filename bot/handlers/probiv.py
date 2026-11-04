@@ -35,6 +35,8 @@ from bot.db.queries import (
     link_military_relative,
     get_military_by_id,
     find_relative_global_dup, insert_relative_v2, get_manager_by_id,   # B1
+    is_relative_linked_to_military,                                    # дубль по тому же военному
+    count_military_relatives,                                          # защита от повторного пробива
     insert_relative_phones, is_phone_taken,                            # multi-phones
 )
 
@@ -91,6 +93,31 @@ async def run_probiv_after_save(
             "⚠️ У вас не указан офис. Обратитесь к админу."
         )
         return
+
+    # Повторный пробив уже заполненного лида — спрашиваем подтверждение
+    if military_id and not fsm_data.get("probiv_force"):
+        _existing = await count_military_relatives(military_id)
+        if _existing > 0:
+            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+            await state.update_data(probiv_pending={
+                "full_name": full_name,
+                "birth_date": birth_date.isoformat() if birth_date else None,
+                "military_id": military_id,
+                "office": office,
+            })
+            await status_msg.edit_text(
+                f"⚠️ У этого лида уже {_existing} родственник(ов).\n\n"
+                f"Пробивать заново? Каждый пробив списывает деньги с Sauron.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔄 Да, пробить заново",
+                                          callback_data="probiv:repeat:yes")],
+                    [InlineKeyboardButton(text="❌ Отмена",
+                                          callback_data="probiv:repeat:no")],
+                ]),
+            )
+            return
+    if fsm_data.get("probiv_force"):
+        await state.update_data(probiv_force=False)
 
     try:
         result: ProbivResult = await probit_person(
@@ -556,6 +583,22 @@ async def attach_do(callback: CallbackQuery, state: FSMContext, manager: dict):
     # Сюда мы попадаем только если дубля нет совсем, ИЛИ дубль в своём офисе.
     # global_dup имеет все поля для плашки (id, full_name, birth_date, phone, address).
     if global_dup:
+        # Уже привязан к ЭТОМУ военному — сообщаем и выходим, без кнопок выбора
+        if await is_relative_linked_to_military(global_dup["id"], military_id):
+            import html as _h
+            _n = _h.escape(global_dup.get("full_name") or "—")
+            _b = global_dup.get("birth_date")
+            _bs = _b.strftime("%d.%m.%Y") if _b else "—"
+            await callback.message.answer(
+                f"✅ <b>{_n}</b> ({_bs}) уже закреплён за этим военным.",
+                parse_mode="HTML",
+            )
+            try:
+                await callback.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            return
+
         # Запомним что хотим закрепить — для последующих коллбэков "Закрепить как нового / Использовать"
         data = await state.get_data()
         pending = data.get("attach_pending", {})
@@ -688,3 +731,41 @@ async def _finalize_attach(callback: CallbackQuery, state: FSMContext,
         msg += f"\n\n_Остальных кандидатов из списка можно пробить кнопками выше ({not_yet_clicked} осталось)._"
 
     await callback.message.answer(msg, parse_mode="Markdown")
+
+# ════════════════════════════════════════════════════════════
+#  Подтверждение повторного пробива уже заполненного лида
+# ════════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "probiv:repeat:yes")
+async def probiv_repeat_yes(callback: CallbackQuery, state: FSMContext, manager: dict):
+    await callback.answer()
+    data = await state.get_data()
+    pending = data.get("probiv_pending") or {}
+    if not pending:
+        await callback.message.answer("⚠️ Контекст пробива утерян. Запустите заново.")
+        return
+    from datetime import date as _date
+    _bd = pending.get("birth_date")
+    birth_date = _date.fromisoformat(_bd) if _bd else None
+    await state.update_data(probiv_force=True, probiv_pending=None)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await run_probiv_after_save(
+        callback.message, state,
+        full_name=pending["full_name"],
+        birth_date=birth_date,
+        military_id=pending.get("military_id"),
+        office=pending.get("office"),
+    )
+
+
+@router.callback_query(F.data == "probiv:repeat:no")
+async def probiv_repeat_no(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("Отменено")
+    await state.update_data(probiv_pending=None, probiv_force=False)
+    try:
+        await callback.message.edit_text("❌ Повторный пробив отменён.")
+    except Exception:
+        pass

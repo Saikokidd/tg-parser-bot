@@ -895,3 +895,11 @@ def manager_pick_kb(
     )])
     
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def military_entry_type_kb() -> InlineKeyboardMarkup:
+    """Развилка после '🔍 Пробить': ФИО+ДР (с пробивом Sauron) или Позывной (ручной ввод, без Sauron)."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👤 По ФИО + дате рождения", callback_data="mil_entry:fio")],
+        [InlineKeyboardButton(text="🪖 По позывному", callback_data="mil_entry:callsign")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")],
+    ])

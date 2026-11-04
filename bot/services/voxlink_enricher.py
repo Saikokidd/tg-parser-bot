@@ -19,10 +19,10 @@ from bot.services.mvpsoll_service import lookup_phone, lookup_phones_batch, Voxl
 INTERVAL_SECONDS = 10 * 60  # 10 минут
 
 # Сколько раз пытаемся для одного номера. После N неудач — помечаем как skipped.
-MAX_ATTEMPTS = 2
+MAX_ATTEMPTS = 5
 
 # Сколько номеров обрабатываем за один прогон (чтобы не висеть в БД часами)
-BATCH_LIMIT = 300
+BATCH_LIMIT = 100
 
 # Параллельность запросов
 PARALLEL = 3
@@ -66,6 +66,7 @@ async def _fetch_candidates(limit: int) -> list:
             WHERE phone IS NOT NULL AND phone != ''
               AND (extra->>'operator' IS NULL OR extra->>'operator' = '')
               AND COALESCE((extra->>'voxlink_skipped')::boolean, FALSE) = FALSE
+              AND phone LIKE '+79%' AND length(phone) = 12
             ORDER BY id
             LIMIT $1
             """,
@@ -74,8 +75,18 @@ async def _fetch_candidates(limit: int) -> list:
         return [dict(r) for r in rows]
 
 
-async def _update_with_info(rel_id: int, current_extra: dict, info: dict) -> None:
+async def _update_with_info(rel_id: int, current_extra, info: dict) -> None:
     """Записать operator/region в extra, не перетирая чужие поля."""
+    import json as _json
+    if isinstance(current_extra, str):
+        try:
+            current_extra = _json.loads(current_extra)
+        except Exception:
+            current_extra = {}
+    if not isinstance(current_extra, dict):
+        import logging as _lg
+        _lg.getLogger(__name__).warning(f"[#{rel_id}] extra не dict: type={type(current_extra)} val={repr(current_extra)[:200]}")
+        current_extra = {}
     new_extra = dict(current_extra or {})
     if info.get("operator"):
         new_extra["operator"] = info["operator"]
@@ -101,6 +112,12 @@ async def _bump_attempts(rel_id: int, current_extra: dict) -> int:
     Увеличиваем счётчик попыток. Если достигли MAX_ATTEMPTS — помечаем как skipped.
     Возвращаем новое значение счётчика.
     """
+    import json as _json
+    if isinstance(current_extra, str):
+        try:
+            current_extra = _json.loads(current_extra)
+        except Exception:
+            current_extra = {}
     new_extra = dict(current_extra or {})
     attempts = int(new_extra.get("voxlink_attempts", 0)) + 1
     new_extra["voxlink_attempts"] = attempts

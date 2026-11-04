@@ -30,6 +30,7 @@ from bot.db.queries import (
     get_source_by_id, attach_source_to_military,
 )
 from bot.keyboards.menus import (
+    military_entry_type_kb,
     confirm_military_with_dups_kb,
     take_over_military_kb,
     source_pick_kb,
@@ -46,6 +47,7 @@ class MilitaryStates(StatesGroup):
     waiting_extra_info = State()         # доп. инфа (БЧ/позывной/статус — свободный текст)
     waiting_source_choice = State()      # выбор источника кнопками
     waiting_source_text = State()        # ввод текста для нового источника (после "Свой вариант")
+    waiting_callsign = State()           # ввод позывного (ветка без Sauron)
 
 
 # ──────────── /cancel ────────────
@@ -55,6 +57,7 @@ class MilitaryStates(StatesGroup):
 @router.message(Command("cancel"), MilitaryStates.waiting_source_choice)
 @router.message(Command("cancel"), MilitaryStates.waiting_source_text)
 @router.message(Command("cancel"), MilitaryStates.waiting_dup_decision)
+@router.message(Command("cancel"), MilitaryStates.waiting_callsign)
 async def cancel_military_flow(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("❌ Действие отменено.")
@@ -65,21 +68,86 @@ async def cancel_military_flow(message: Message, state: FSMContext):
 @router.message(F.text == "🔍 Пробить")
 async def btn_probivat(message: Message, state: FSMContext, manager: dict | None):
     if not manager:
-        await message.answer(
-            "Только менеджеры могут вносить записи."
-        )
+        await message.answer("Только менеджеры могут вносить записи.")
         return
-
-    await state.set_state(MilitaryStates.waiting_template)
     await message.answer(
+        "Выберите способ ввода лида:",
+        reply_markup=military_entry_type_kb(),
+    )
+
+
+@router.callback_query(F.data == "mil_entry:fio")
+async def mil_entry_fio(callback: CallbackQuery, state: FSMContext):
+    """Ввод по ФИО+ДР — существующий путь с пробивом через Sauron."""
+    await callback.answer()
+    await state.set_state(MilitaryStates.waiting_template)
+    await callback.message.edit_text(
         "<b>❗️СЮДА ВНОСЯТСЯ ТОЛЬКО ВОЕННЫЕ❗️</b>\n\n"
         "Отправьте <b>ФИО и дату рождения</b> в одну строку:\n"
         "<code>Иванов Иван Иванович 15.03.1985</code>\n\n"
         "Можно с запятой или с тире в начале:\n"
         "<code>- Иванов Иван Иванович, 15.03.1985</code>\n\n"
-        "<i>На следующем шаге сможете добавить статус, БЧ, позывной и любую другую информацию.</i>\n\n"
+        "<i>На следующем шаге сможете добавить статус, БЧ, позывной и другую информацию.</i>\n\n"
         "<i>Отмена — /cancel</i>",
         parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data == "mil_entry:callsign")
+async def mil_entry_callsign(callback: CallbackQuery, state: FSMContext):
+    """Ввод по позывному — ручной ввод без Sauron."""
+    await callback.answer()
+    await state.set_state(MilitaryStates.waiting_callsign)
+    await callback.message.edit_text(
+        "<b>🪖 Ввод по позывному</b>\n\n"
+        "Отправьте <b>позывной</b> военного (можно с ФИО, если есть):\n"
+        "<code>Калаш</code> или <code>Иванов Иван Калаш</code>\n\n"
+        "<i>Дата рождения не требуется. Пробив Sauron не выполняется — родственника внесёте вручную.</i>\n\n"
+        "<i>Отмена — /cancel</i>",
+        parse_mode="HTML"
+    )
+
+
+# ──────────── ПРИЁМ ПОЗЫВНОГО (ветка без Sauron) ────────────
+@router.message(MilitaryStates.waiting_callsign)
+async def receive_callsign(message: Message, state: FSMContext, manager: dict):
+    if await is_menu_button_pressed(message, state):
+        return
+    callsign = (message.text or "").strip()
+    if not callsign:
+        await message.answer("⚠️ Отправьте позывной текстом. Отмена — /cancel")
+        return
+    # Защита: команды (/cancel, /skip, /start и пр.) не сохраняем как позывной
+    if callsign.startswith("/"):
+        await message.answer("⚠️ Это команда, а не позывной. Отправьте позывной текстом или /cancel для отмены.")
+        return
+    manager_id = manager["id"]
+    manager_office = manager.get("office")
+    parsed = {
+        "full_name": callsign,
+        "birth_date": None,
+        "extra": {"entry_type": "callsign", "callsign": callsign},
+    }
+    record = await insert_military_v2(parsed, manager_id)
+    await message.answer(
+        f"✅ *Сохранено в базу* (по позывному)\n\n{record['full_name']}",
+        parse_mode="Markdown",
+    )
+    await state.update_data(
+        saved_military_id=record["id"],
+        saved_full_name=record["full_name"],
+        saved_birth_date=None,
+        saved_manager_id=manager_id,
+        saved_office=manager_office,
+        entry_type="callsign",
+    )
+    await state.set_state(MilitaryStates.waiting_extra_info)
+    await message.answer(
+        "📝 *Доп. информация*\n\n"
+        "Введите любую доп. информацию о военном:\n"
+        "статус (200/500/БЗ), Б/Ч, заметки.\n\n"
+        "Если нечего добавить — отправьте /skip",
+        parse_mode="Markdown",
     )
 
 
@@ -534,8 +602,30 @@ async def receive_source_text(message: Message, state: FSMContext):
 
 
 async def _continue_to_probit(target: Message, state: FSMContext):
-    """Запустить автопробив после того как разобрались с источником"""
+    """Запустить автопробив после того как разобрались с источником.
+    Для лида по позывному (entry_type=callsign) пробив НЕ запускается —
+    вместо этого сразу ведём к ручному вводу родственника (обязательного).
+    """
     data = await state.get_data()
+    # ── ВЕТКА ПОЗЫВНОГО: без Sauron, сразу к ручному вводу родственника ──
+    if data.get("entry_type") == "callsign":
+        from bot.handlers.relatives import RelativeStates
+        # relatives-хендлер ждёт military_id/manager_id (без префикса saved_)
+        await state.update_data(
+            military_id=data.get("saved_military_id"),
+            manager_id=data.get("saved_manager_id"),
+        )
+        await state.set_state(RelativeStates.waiting_template)
+        await target.answer(
+            f"*{data.get('saved_full_name')}*\n\n"
+            "Военный сохранён по позывному. Теперь внесите *родственника* вручную "
+            "(обязательно минимум один).\n\n"
+            "Можно несколько разом — через пустую строку.\n\n"
+            "_Отмена — /cancel_",
+            parse_mode="Markdown",
+        )
+        return
+    # ── ОБЫЧНЫЙ ПУТЬ: пробив через Sauron ──
     full_name = data["saved_full_name"]
     birth_date = data.get("saved_birth_date")
 

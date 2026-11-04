@@ -26,7 +26,7 @@ from bot.parser import sauron_parser
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("enrich_relatives")
 
-SOURCE = "sauron_links_20260827"
+SOURCE = "sauron_links_20261015"
 OFFICE = "pvl"          # родня загружена в pvl, токен SAURON_TOKEN_PVL
 CONCURRENCY = 3         # параллельных запросов к Sauron
 PAUSE_BETWEEN = 0.3     # пауза между запросами (сек), бережём rate-limit

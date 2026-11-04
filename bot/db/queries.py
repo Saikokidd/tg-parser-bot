@@ -484,6 +484,11 @@ async def find_relative_duplicates_with_links(
             FROM relatives r
             LEFT JOIN managers mgr ON r.added_by = mgr.id
             WHERE (
+                LOWER(r.full_name) = LOWER($1)
+                OR r.birth_date = $2
+                OR r.phone = $3
+            )
+            AND (
                 (CASE WHEN $1::text IS NOT NULL AND LOWER(r.full_name) = LOWER($1) THEN 1 ELSE 0 END) +
                 (CASE WHEN $2::date IS NOT NULL AND r.birth_date = $2 THEN 1 ELSE 0 END) +
                 (CASE WHEN $3::text IS NOT NULL AND r.phone = $3 THEN 1 ELSE 0 END) +
@@ -998,6 +1003,15 @@ async def find_relative_global_dup(
     Возвращает первый по релевантности (наибольшее число совпадений).
     Поля: id, full_name, birth_date, phone, address, office, added_by, manager_name.
     """
+    # Дата с переставленными днём и месяцем: Sauron иногда отдаёт одного
+    # человека дважды в разных форматах (11.10.1988 и 10.11.1988).
+    swapped = None
+    if birth_date and birth_date.day <= 12 and birth_date.day != birth_date.month:
+        try:
+            swapped = birth_date.replace(month=birth_date.day, day=birth_date.month)
+        except ValueError:
+            swapped = None
+
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -1007,7 +1021,9 @@ async def find_relative_global_dup(
                        r.office, r.added_by, r.created_at,
                        (
                            (CASE WHEN LOWER(r.full_name) = LOWER($1) THEN 1 ELSE 0 END) +
-                           (CASE WHEN r.birth_date = $2 THEN 1 ELSE 0 END) +
+                           (CASE WHEN r.birth_date = $2
+                                   OR ($5::date IS NOT NULL AND r.birth_date = $5)
+                                 THEN 1 ELSE 0 END) +
                            (CASE WHEN r.phone = $3 THEN 1 ELSE 0 END) +
                            (CASE WHEN LOWER(r.address) = LOWER($4) THEN 1 ELSE 0 END)
                        ) AS match_count
@@ -1017,6 +1033,7 @@ async def find_relative_global_dup(
                 -- сам с собой пару не составит), поэтому кандидатов не теряем.
                 WHERE LOWER(r.full_name) = LOWER($1)
                    OR r.birth_date = $2
+                   OR r.birth_date = $5
                    OR r.phone = $3
             )
             SELECT c.id, c.full_name, c.birth_date, c.phone, c.address,
@@ -1027,9 +1044,31 @@ async def find_relative_global_dup(
             ORDER BY c.match_count DESC, c.created_at ASC
             LIMIT 1
             """,
-            full_name, birth_date, phone, address
+            full_name, birth_date, phone, address, swapped
         )
         return dict(row) if row else None
+
+
+async def is_relative_linked_to_military(relative_id: int, military_id: int) -> bool:
+    """Привязан ли этот родственник к этому военному."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT 1 FROM military_relatives "
+            "WHERE military_id = $1 AND relative_id = $2 LIMIT 1",
+            military_id, relative_id,
+        )
+        return row is not None
+
+
+async def count_military_relatives(military_id: int) -> int:
+    """Сколько родственников уже привязано к лиду."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            "SELECT COUNT(*) FROM military_relatives WHERE military_id = $1",
+            military_id,
+        ) or 0
 
 
 # ──────────── Вставка с автоматическим office ────────────
