@@ -18,3 +18,4 @@ parsed/
 *.bak_*
 *.csv
 .env*
+google_sa.json
