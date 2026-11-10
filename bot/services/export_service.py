@@ -212,6 +212,80 @@ def _apply_cell_style(cell, is_link: bool = False):
 
 # ──────────── Главная функция ────────────
 
+# ──────────── Сортировка по часовому поясу ────────────
+# tz_offset в базе хранится как смещение от Москвы: "МСК", "МСК+4", "МСК-1".
+# Москва = UTC+3, поэтому UTC+7 — это МСК+4.
+FAR_TZ_FROM = 4          # с какого смещения от МСК считаем регион дальним
+
+GROUP_FAR, GROUP_UNKNOWN, GROUP_NEAR = 0, 1, 2
+
+
+def _tz_rank(extra) -> int | None:
+    """'МСК' → 0, 'МСК+4' → 4, 'МСК-1' → -1. None, если пояс неизвестен."""
+    if not isinstance(extra, dict):
+        return None
+    val = extra.get("tz_offset")
+    if not isinstance(val, str):
+        return None
+    val = val.strip().upper().replace(" ", "")
+    if not val.startswith("МСК"):
+        return None
+    tail = val[3:]
+    if not tail:
+        return 0
+    try:
+        return int(tail)
+    except ValueError:
+        return None
+
+
+def _lead_groups(military_records: list, relatives: list) -> dict:
+    """
+    Группа каждого военного: 0 — дальний, 1 — неизвестно, 2 — ближний.
+    Лид считается дальним, если хотя бы у одного его родственника
+    смещение >= FAR_TZ_FROM.
+    """
+    best: dict = {}
+    for r in relatives:
+        rank = _tz_rank(r.get("extra"))
+        if rank is None:
+            continue
+        for m in (r.get("linked_military") or []):
+            mid = m.get("id")
+            if mid is None:
+                continue
+            if mid not in best or rank > best[mid]:
+                best[mid] = rank
+
+    groups = {}
+    for m in military_records:
+        mid = m.get("id")
+        rank = best.get(mid)
+        if rank is None:
+            groups[mid] = GROUP_UNKNOWN
+        else:
+            groups[mid] = GROUP_FAR if rank >= FAR_TZ_FROM else GROUP_NEAR
+    return groups
+
+
+def _sort_by_tz(military_records: list, relatives: list) -> tuple:
+    """
+    Переставить оба списка: дальние регионы в начало, неизвестные в середину,
+    ближние в конец. Внутри групп порядок сохраняется (сортировка стабильна).
+    """
+    groups = _lead_groups(military_records, relatives)
+
+    def rel_key(r):
+        gs = [groups[m["id"]] for m in (r.get("linked_military") or [])
+              if m.get("id") in groups]
+        return min(gs) if gs else GROUP_UNKNOWN
+
+    return (
+        sorted(military_records, key=lambda m: groups.get(m.get("id"), GROUP_UNKNOWN)),
+        sorted(relatives, key=rel_key),
+    )
+
+
 def build_xlsx(military_records: list, relatives: list,
                manager_label: str = None) -> bytes:
     """
@@ -221,6 +295,11 @@ def build_xlsx(military_records: list, relatives: list,
     relatives — список родственников (dict с linked_military)
     manager_label — название (для имени файла, не используется внутри книги)
     """
+    # Дальние регионы (UTC+7 и восточнее) — в начало обоих листов.
+    # Делается здесь, до построения military_row_by_id, чтобы гиперссылки
+    # между листами перестроились по новому порядку.
+    military_records, relatives = _sort_by_tz(military_records, relatives)
+
     wb = Workbook()
 
     # ──────────── ЛИСТ 1: РОДСТВЕННИКИ ────────────
@@ -277,7 +356,7 @@ def build_xlsx(military_records: list, relatives: list,
             phones_text,
             (f"{extra.get('region')} ({extra.get('tz_offset')})"
              if extra.get("region") and extra.get("tz_offset")
-             else (extra.get("region") or "")),
+             else (extra.get("region") or extra.get("tz_offset") or "")),
             extra.get("snils") or "",
             extra.get("inn") or "",
             extra.get("passport") or "",
