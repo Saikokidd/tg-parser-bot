@@ -125,27 +125,18 @@ async def check_phone_handler(request: web.Request) -> web.Response:
         return web.json_response({"error": "internal error"}, status=500)
 
     if owner_office is None:
-        # Свободен → резервируем за ha (если agent=ha).
-        # Если в будущем другие агенты тоже захотят авто-резерв —
-        # добавим аналогично.
-        reserved_id = None
-        if agent == "ha":
-            reserved_id = await reserve_phone_for_ha(phone, HA_API_MANAGER_ID)
-            if reserved_id:
-                logger.info(
-                    f"api: phone reserved for ha agent={agent} ip={ip} "
-                    f"phone=***{digits[-4:]} new_id={reserved_id}"
-                )
-            else:
-                logger.warning(
-                    f"api: phone reserve FAILED for ha ip={ip} "
-                    f"phone=***{digits[-4:]}"
-                )
+        # Авто-резерв отключён 11.11.2026. За пять месяцев ни один из
+        # 12 392 резервов не стал реальным родственником, при этом каждый
+        # блокировал номер глобально — для pvl и dp в том числе.
+        # Теперь блокировка возникает только при фактическом внесении
+        # родственника через бота.
+        # Ключ "reserved" оставлен в ответе ради совместимости с CRM ha:
+        # убирать поле нельзя, их разбор ответа на него рассчитывает.
         result = {
             "status": "free",
             "office": None,
             "is_yours": False,
-            "reserved": reserved_id is not None,
+            "reserved": False,
         }
     else:
         result = {
