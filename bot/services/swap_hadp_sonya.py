@@ -25,9 +25,10 @@ DONOR_OFFICES = ("ha", "dp", "pvl")
 
 # Кого не трогаем как доноров: получатель, источник возврата
 # и менеджеры, чей запас решили не расходовать.
-EXCLUDE_DONORS = [SONYA, DRIVER, 54, 166, 156, 159, 58]
+EXCLUDE_DONORS = [SONYA, DRIVER, 54, 166, 156, 159, 58, 155, 135]
 # 54 Макс, 166 Коля — запас не расходуем
 # 156 Ника9900, 159 Дима9900, 58 Тёма — сырые посты из каналов, пробива нет
+# 155 azzazello9900, 135 Никита базист — то же самое, посты целиком
 
 
 # Лиды, чей родственник привязан ещё к одному военному, в свап не берём:
@@ -41,7 +42,7 @@ async def pool_donors(conn):
         FROM persons_military pm
         JOIN military_relatives mr ON mr.military_id = pm.id
         LEFT JOIN managers m ON m.id = pm.added_by
-        WHERE pm.exported_at IS NULL AND NOT EXISTS (SELECT 1 FROM military_relatives mr2 JOIN military_relatives mr3 ON mr3.relative_id = mr2.relative_id AND mr3.military_id <> pm.id WHERE mr2.military_id = pm.id)
+        WHERE pm.exported_at IS NULL AND NOT EXISTS (SELECT 1 FROM military_relatives mr2 JOIN military_relatives mr3 ON mr3.relative_id = mr2.relative_id AND mr3.military_id <> pm.id WHERE mr2.military_id = pm.id) AND EXISTS (SELECT 1 FROM military_relatives mrp JOIN relatives rp ON rp.id = mrp.relative_id WHERE mrp.military_id = pm.id AND rp.phone IS NOT NULL AND rp.phone <> '')
           AND pm.office = ANY($1)
           AND pm.added_by <> ALL($2::int[])
         GROUP BY pm.id, pm.added_by, pm.office, m.name
