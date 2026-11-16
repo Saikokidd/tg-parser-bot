@@ -22,7 +22,7 @@ import urllib.request
 from bot.db.queries import get_pool, insert_probiv_log
 from bot.services.sauron_api import query_person, split_full_name
 
-SONYA, DRIVER = 111, 139
+SONYA, DRIVER, FINDRE = 111, 139, 1
 OFFICE = "pvl"
 GOOD_YEARS = {2025, 2026}
 OUT = "/root/exports/sonya_base.txt"
@@ -163,7 +163,10 @@ async def run(limit: int, apply: bool,
         if dates:
             best = max(dates.values())          # берём самую позднюю
         good = best is not None and best.year in GOOD_YEARS
-        owner = SONYA if good else DRIVER
+        # ИНН есть, но год не тот — к Драйверу, их перепроверяем бесплатно.
+        # ИНН не нашёлся — к Findre: перепроверять нечего, нужен новый
+        # платный пробив.
+        owner = SONYA if good else (DRIVER if inns else FINDRE)
 
         patch = {
             "inn_checked_at": today.isoformat(),
@@ -185,7 +188,7 @@ async def run(limit: int, apply: bool,
         else:
             to_driver += 1
 
-        mark = "СОНЕ" if good else "драйверу"
+        mark = "СОНЕ" if good else ("драйверу" if inns else "findre")
         print(f"  [{i}/{len(work)}] id={r['id']:<7} инн:{len(inns)} "
               f"дата:{best or '—'} → {mark}   ${spent:.2f}")
         await asyncio.sleep(PAUSE_SAURON)
