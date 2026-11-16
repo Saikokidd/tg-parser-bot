@@ -514,6 +514,26 @@ async def find_relative_duplicates_with_links(
 #                       ЭКСПОРТ
 # ════════════════════════════════════════════════════════════
 
+# Кому в выгрузку попадают только лиды, у которых есть родственник с телефоном.
+# Список в .env: EXPORT_REQUIRE_PHONE_MANAGERS=111  (пусто — правило выключено).
+#
+# Появилось 16.11.2026: до этого "есть родня" и "есть телефон" совпадали, потому
+# что родственника заводили руками вместе с номером. После массовой привязки
+# родни из связей Саурона это перестало быть верно — у Сони оказалось 1063 лида
+# с роднёй без единого номера.
+def _phone_required() -> set:
+    import os
+    raw = os.getenv("EXPORT_REQUIRE_PHONE_MANAGERS", "111")
+    return {int(x.strip()) for x in raw.split(",") if x.strip().isdigit()}
+
+
+_PHONE_EXISTS = (
+    "EXISTS (SELECT 1 FROM military_relatives mr2 "
+    "JOIN relatives r2 ON r2.id = mr2.relative_id "
+    "WHERE mr2.military_id = pm.id AND COALESCE(r2.phone, '') <> '')"
+)
+
+
 async def count_available_for_export(manager_id: int = None) -> int:
     """
     Сколько военных доступно для экспорта.
@@ -525,8 +545,10 @@ async def count_available_for_export(manager_id: int = None) -> int:
     pool = await get_pool()
     async with pool.acquire() as conn:
         if manager_id:
+            extra = ("  AND " + _PHONE_EXISTS
+                     if manager_id in _phone_required() else "")
             return await conn.fetchval(
-                """
+                f"""
                 SELECT COUNT(*) FROM persons_military pm
                 WHERE pm.exported_at IS NULL
                   AND pm.added_by = $1
@@ -534,6 +556,7 @@ async def count_available_for_export(manager_id: int = None) -> int:
                       SELECT 1 FROM military_relatives mr
                       WHERE mr.military_id = pm.id
                   )
+                {extra}
                 """,
                 manager_id
             )
@@ -564,6 +587,8 @@ async def fetch_military_for_export(manager_id: int = None, limit: int = None) -
         if manager_id:
             where.append(f"pm.added_by = ${len(params) + 1}")
             params.append(manager_id)
+            if manager_id in _phone_required():
+                where.append(_PHONE_EXISTS)
 
         sql = f"""
             SELECT pm.*, m.name AS manager_name,
@@ -2323,3 +2348,56 @@ async def autofeed_should_run(target_manager: int = 111, daily_limit: int = 30) 
         allowed, reason = True, f"ок ({today}/{daily_limit}, {win['kyiv_hour']}ч Киев)"
     return {"allowed": allowed, "reason": reason,
             "today": today, "limit": daily_limit, "kyiv_hour": win["kyiv_hour"]}
+
+# ════════════════════════════════════════════════════════════
+#            ПРОВЕРКА ИНН ПО РЕЕСТРУ ФНС
+# ════════════════════════════════════════════════════════════
+
+async def mark_inn_check(military_id: int, inns, invalid_date,
+                         checked: bool = True) -> None:
+    """
+    Записать результат проверки ИНН в extra военного.
+
+    checked=False — сервис ФНС не ответил. Тогда метку о проверке не ставим,
+    чтобы фоновый прогон потом добрал этого лида.
+
+    Параметр объявлен как text и кастуется в jsonb уже в SQL: на пуле висит
+    кодек, который сам прогоняет значение через json.dumps, и готовая строка
+    закодировалась бы вторым слоем.
+    """
+    import json as _json
+    from datetime import date as _date
+
+    patch = {
+        "inn": ", ".join(sorted(inns)) if inns else "",
+        "inn_invalid_date": invalid_date.isoformat() if invalid_date else "",
+    }
+    patch["inn_checked_at" if checked else "inn_check_failed_at"] = \
+        _date.today().isoformat()
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE persons_military
+            SET extra = COALESCE(extra, '{}'::jsonb) || $2::text::jsonb
+            WHERE id = $1
+            """,
+            military_id, _json.dumps(patch, ensure_ascii=False),
+        )
+
+
+async def move_military_to(military_id: int, manager_id: int) -> None:
+    """Передать лид другому менеджеру. Офис берём у получателя."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE persons_military
+            SET added_by = $2,
+                office = COALESCE((SELECT office FROM managers WHERE id = $2),
+                                  office)
+            WHERE id = $1
+            """,
+            military_id, manager_id,
+        )

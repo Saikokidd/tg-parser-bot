@@ -82,7 +82,7 @@ RELATIVE_COLUMNS = [
 
 # ──────────── Помощники форматирования ────────────
 
-STD_EXTRA_KEYS_RELATIVE = {"snils", "inn", "passport", "email", "emails", "operator", "region", "phones_all", "old_operator", "tz_offset"}
+STD_EXTRA_KEYS_RELATIVE = {"role", "snils", "inn", "passport", "email", "emails", "operator", "region", "phones_all", "old_operator", "tz_offset"}
 STD_EXTRA_KEYS_MILITARY = {"unit", "callsign", "note", "source"}
 
 

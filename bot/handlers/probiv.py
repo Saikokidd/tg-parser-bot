@@ -140,6 +140,62 @@ async def run_probiv_after_save(
         await status_msg.edit_text(format_probiv_result(result, header="🔍 *Пробив*"))
         return
 
+    # ── Проверка ИНН по реестру недействительных ИНН ФНС (только pvl) ──
+    # Ответ Саурона выше уже оплачен, ИНН достаём из него же — лишних
+    # запросов и трат нет. ФНС бесплатна.
+    #
+    # Аннулирован в разрешённом году  → лид остаётся у менеджера.
+    # Иначе лид не теряем, а передаём на отложенную перепроверку: её можно
+    # делать одной ФНС сколько угодно раз и бесплатно.
+    from bot.services.fns_inn import (
+        FnsUnavailable, allowed_years, defer_manager_id, noinn_manager_id,
+        extract_inns, latest_invalid, verdict,
+    )
+
+    if office == "pvl" and military_id and birth_date and allowed_years(manager_id):
+        from bot.db.queries import mark_inn_check, move_military_to
+
+        inns = extract_inns(result.raw_results)
+        try:
+            dates = await latest_invalid(inns)
+        except FnsUnavailable as e:
+            logger.warning("ФНС недоступна (military_id=%s): %s", military_id, e)
+            await mark_inn_check(military_id, inns, None, checked=False)
+            await target.answer(
+                "\u26a0\ufe0f Сервис ФНС не ответил — проверка ИНН пропущена, "
+                "лид сохранён как обычно."
+            )
+        else:
+            ok, best = verdict(dates, manager_id)
+            await mark_inn_check(military_id, inns, best)
+            shown = "\n".join(
+                f"<code>{i}</code> — недействителен с {d.strftime('%d.%m.%Y')}"
+                for i, d in sorted(dates.items())
+            )
+            if ok:
+                await target.answer(
+                    "\u2705 Проверка ИНН пройдена\n" + shown, parse_mode="HTML")
+            else:
+                if dates:
+                    why = shown + "\n\nГод аннулирования вне рабочего диапазона."
+                elif inns:
+                    why = "ИНН действующий: " + ", ".join(
+                        f"<code>{i}</code>" for i in sorted(inns))
+                else:
+                    why = "ИНН в ответе Саурона не найден."
+                # ИНН есть, но год не тот — в отложенные, их перепроверяем
+                # бесплатно. ИНН не нашёлся — отдельная куча, там нужен
+                # повторный платный пробив.
+                await move_military_to(
+                    military_id,
+                    defer_manager_id() if inns else noinn_manager_id())
+                await target.answer(
+                    "\u23f8 Лид отложен: смерть не зарегистрирована.\n" + why
+                    + "",
+                    parse_mode="HTML",
+                )
+                return
+
     # Сохраняем найденных людей в FSM для кнопок "Пробить далее"
     persons_index = []
     seen = set()
