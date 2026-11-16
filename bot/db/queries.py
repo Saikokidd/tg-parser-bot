@@ -2401,3 +2401,36 @@ async def move_military_to(military_id: int, manager_id: int) -> None:
             """,
             military_id, manager_id,
         )
+
+
+async def mark_death_check(military_id: int, inns, invalid_date,
+                           cert_date, death_date, checked: bool = True) -> None:
+    """
+    Записать в extra всё, что узнали о смерти: ИНН, дату его аннулирования,
+    дату выдачи свидетельства и дату смерти.
+
+    checked=False — ФНС не ответила. Метку о проверке не ставим, чтобы
+    фоновый прогон добрал этого лида позже.
+    """
+    import json as _json
+    from datetime import date as _date
+
+    patch = {
+        "inn": ", ".join(sorted(inns)) if inns else "",
+        "inn_invalid_date": invalid_date.isoformat() if invalid_date else "",
+        "cert_date": cert_date.isoformat() if cert_date else "",
+        "death_date": death_date.isoformat() if death_date else "",
+    }
+    patch["inn_checked_at" if checked else "inn_check_failed_at"] = \
+        _date.today().isoformat()
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE persons_military
+            SET extra = COALESCE(extra, '{}'::jsonb) || $2::text::jsonb
+            WHERE id = $1
+            """,
+            military_id, _json.dumps(patch, ensure_ascii=False),
+        )

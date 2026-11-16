@@ -164,3 +164,91 @@ def noinn_manager_id() -> int:
     По умолчанию Findre (1).
     """
     return int(os.getenv("PVL_INN_NOINN_MANAGER_ID", "1"))
+
+
+# ──────────── ЗАГС: свидетельство о смерти ────────────
+
+def _pdate(v):
+    """'2025-12-03' или '2025-12-04 05:06:45.937' → date, иначе None."""
+    try:
+        return dt.date.fromisoformat(str(v or "").strip()[:10])
+    except ValueError:
+        return None
+
+
+def _norm_fio(v) -> str:
+    t = str(v or "").lower().replace("\u0451", "\u0435")
+    t = re.sub(r"[^а-яa-z\s-]", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+# Роли, означающие, что запись о ДРУГОМ человеке: наш лишь участник
+OTHER_ROLES = ("отец", "мать", "супруг", "сын", "дочь", "заявител",
+               "ребен", "ребён", "родител")
+
+
+def _is_subject(rec: dict, full_name, birth_date) -> bool:
+    """
+    Запись должна быть о том, кого пробиваем.
+
+    В ответе Саурона лежат и записи его связей. Без этой проверки смерть
+    отца или ребёнка засчиталась бы самому военному — он жив, а бот сказал
+    бы «проходит».
+    """
+    role = str(rec.get("Роль участника", "")).lower()
+    if role and any(r in role for r in OTHER_ROLES):
+        return False
+    bd = _pdate(rec.get("День рождения"))
+    if birth_date is not None and bd is not None and bd != birth_date:
+        return False
+    a, b = _norm_fio(rec.get("ФИО")), _norm_fio(full_name)
+    if a and b and a.split()[:2] != b.split()[:2]:
+        return False
+    return True
+
+
+def extract_zags_death(node, full_name=None, birth_date=None, found=None) -> list:
+    """
+    Записи ЗАГС о смерти: (дата выдачи свидетельства, дата смерти, источник).
+
+    В выгрузках ЗАГС лежат все акты — браки, рождения, смерти, — и у одного
+    человека их бывает несколько за разные годы. Поэтому отбираем строго по
+    типу события: иначе однажды примем за погибшего живого, у которого в
+    рабочем году родился ребёнок.
+    """
+    if found is None:
+        found = []
+    if isinstance(node, dict):
+        src = str(node.get("Источник", "")).strip()
+        ev = str(node.get("Тип события", "")).lower()
+        doc = str(node.get("Документ", "")).lower()
+        if (src.upper().startswith("ЗАГС") and ("смерт" in ev or "смерт" in doc)
+                and _is_subject(node, full_name, birth_date)):
+            found.append((
+                _pdate(node.get("Дата выдачи свидетельства")),
+                _pdate(node.get("Дата смерти") or node.get("Дата мероприятия")),
+                src,
+            ))
+        for v in node.values():
+            extract_zags_death(v, full_name, birth_date, found)
+    elif isinstance(node, list):
+        for item in node:
+            extract_zags_death(item, full_name, birth_date, found)
+    return found
+
+
+def zags_years(manager_id: int | None = None) -> set:
+    """
+    Рабочие годы выдачи свидетельства.
+
+    PVL_ZAGS_YEARS, при отсутствии — те же годы, что и для ИНН.
+    Дата выдачи свидетельства важнее даты аннулирования ИНН: последняя
+    равна дате смерти, а нам нужно знать, когда семья получила документ.
+    """
+    raw = ""
+    if manager_id is not None:
+        raw = os.getenv(f"PVL_ZAGS_YEARS_{manager_id}", "")
+    if not raw:
+        raw = os.getenv("PVL_ZAGS_YEARS", "")
+    years = {int(x) for x in re.findall(r"\d{4}", raw)}
+    return years or allowed_years(manager_id)

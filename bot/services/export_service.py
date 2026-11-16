@@ -83,7 +83,7 @@ RELATIVE_COLUMNS = [
 # ──────────── Помощники форматирования ────────────
 
 STD_EXTRA_KEYS_RELATIVE = {"role", "snils", "inn", "passport", "email", "emails", "operator", "region", "phones_all", "old_operator", "tz_offset"}
-STD_EXTRA_KEYS_MILITARY = {"unit", "callsign", "note", "source"}
+STD_EXTRA_KEYS_MILITARY = {"unit", "callsign", "note", "source", "inn", "inn_invalid_date", "inn_checked_at", "inn_check_failed_at", "cert_date", "death_date"}
 
 
 def _fmt_date(d):

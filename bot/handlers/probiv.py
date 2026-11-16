@@ -140,61 +140,83 @@ async def run_probiv_after_save(
         await status_msg.edit_text(format_probiv_result(result, header="🔍 *Пробив*"))
         return
 
-    # ── Проверка ИНН по реестру недействительных ИНН ФНС (только pvl) ──
-    # Ответ Саурона выше уже оплачен, ИНН достаём из него же — лишних
-    # запросов и трат нет. ФНС бесплатна.
+    # ── Проверка признаков смерти (только pvl) ─────────────────────────
+    # Ответ Саурона выше уже оплачен: и ИНН, и записи ЗАГС берём из него,
+    # отдельных запросов и трат нет.
     #
-    # Аннулирован в разрешённом году  → лид остаётся у менеджера.
-    # Иначе лид не теряем, а передаём на отложенную перепроверку: её можно
-    # делать одной ФНС сколько угодно раз и бесплатно.
+    # Два независимых признака, лид проходит по любому:
+    #   ЗАГС — свидетельство о смерти, смотрим год выдачи. Прямой документ,
+    #          именно с ним семья идёт за выплатой.
+    #   ИНН  — дата аннулирования в реестре ФНС. Это дата смерти, а не
+    #          регистрации, поэтому признак слабее; зато реестр полный,
+    #          а выгрузки ЗАГС у Саурона дырявые.
+    #
+    # Не прошёл — лид не теряем, а передаём на отложенную перепроверку.
+    # ФНС не ответила и по ЗАГС не прошёл — не блокируем: падение чужого
+    # сервиса не должно останавливать работу офиса.
     from bot.services.fns_inn import (
         FnsUnavailable, allowed_years, defer_manager_id, noinn_manager_id,
-        extract_inns, latest_invalid, verdict,
+        extract_inns, extract_zags_death, latest_invalid, zags_years,
     )
 
     if office == "pvl" and military_id and birth_date and allowed_years(manager_id):
-        from bot.db.queries import mark_inn_check, move_military_to
+        from bot.db.queries import mark_death_check, move_military_to
 
         inns = extract_inns(result.raw_results)
+        zags = extract_zags_death(result.raw_results, full_name, birth_date)
+        cert = max((z[0] for z in zags if z[0]), default=None)
+        death = min((z[1] for z in zags if z[1]), default=None)
+        zags_ok = cert is not None and cert.year in zags_years(manager_id)
+
+        dates, fns_down = {}, False
         try:
             dates = await latest_invalid(inns)
         except FnsUnavailable as e:
+            fns_down = True
             logger.warning("ФНС недоступна (military_id=%s): %s", military_id, e)
-            await mark_inn_check(military_id, inns, None, checked=False)
-            await target.answer(
-                "\u26a0\ufe0f Сервис ФНС не ответил — проверка ИНН пропущена, "
-                "лид сохранён как обычно."
-            )
+
+        best = max(dates.values()) if dates else None
+        inn_ok = best is not None and best.year in allowed_years(manager_id)
+
+        await mark_death_check(military_id, inns, best, cert, death,
+                               checked=not fns_down)
+
+        rows = []
+        if cert:
+            rows.append(f"Свидетельство о смерти от {cert.strftime('%d.%m.%Y')}")
+        if death:
+            rows.append(f"Дата смерти {death.strftime('%d.%m.%Y')}")
+        if best:
+            rows.append(f"ИНН аннулирован {best.strftime('%d.%m.%Y')}")
+        elif fns_down:
+            rows.append("ФНС не ответила, ИНН не проверен")
+        elif inns:
+            rows.append("ИНН действующий")
         else:
-            ok, best = verdict(dates, manager_id)
-            await mark_inn_check(military_id, inns, best)
-            shown = "\n".join(
-                f"<code>{i}</code> — недействителен с {d.strftime('%d.%m.%Y')}"
-                for i, d in sorted(dates.items())
-            )
-            if ok:
-                await target.answer(
-                    "\u2705 Проверка ИНН пройдена\n" + shown, parse_mode="HTML")
-            else:
-                if dates:
-                    why = shown + "\n\nГод аннулирования вне рабочего диапазона."
-                elif inns:
-                    why = "ИНН действующий: " + ", ".join(
-                        f"<code>{i}</code>" for i in sorted(inns))
-                else:
-                    why = "ИНН в ответе Саурона не найден."
-                # ИНН есть, но год не тот — в отложенные, их перепроверяем
-                # бесплатно. ИНН не нашёлся — отдельная куча, там нужен
-                # повторный платный пробив.
-                await move_military_to(
-                    military_id,
-                    defer_manager_id() if inns else noinn_manager_id())
-                await target.answer(
-                    "\u23f8 Лид отложен: смерть не зарегистрирована.\n" + why
-                    + "",
-                    parse_mode="HTML",
-                )
-                return
+            rows.append("ИНН не найден")
+        body = "\n".join(rows)
+
+        if zags_ok and not inn_ok:
+            verdict_text = "\u2705 Проходит по ЗАГС, по ИНН не проходит.\n" + body
+        elif zags_ok or inn_ok:
+            verdict_text = "\u2705 Проверка пройдена\n" + body
+        elif fns_down:
+            verdict_text = ("\u26a0\ufe0f ФНС не ответила, по ЗАГС не проходит"
+                            " — лид сохранён как обычно.\n" + body)
+        else:
+            await move_military_to(
+                military_id,
+                defer_manager_id() if (inns or zags) else noinn_manager_id())
+            await safe_edit_or_send(
+                status_msg, "\u23f8 Лид не подходит по критериям.\n" + body,
+                parse_mode="HTML")
+            return
+
+        # Вердикт пишем вместо стартового сообщения, а для списка связей
+        # заводим новое: Telegram оставляет правленое сообщение на прежнем
+        # месте, и иначе связи оказываются выше вердикта.
+        await safe_edit_or_send(status_msg, verdict_text, parse_mode="HTML")
+        status_msg = await target.answer("\U0001f50d Собираю возможные связи...")
 
     # Сохраняем найденных людей в FSM для кнопок "Пробить далее"
     persons_index = []
