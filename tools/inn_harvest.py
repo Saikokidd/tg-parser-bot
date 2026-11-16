@@ -20,6 +20,7 @@ import urllib.parse
 import urllib.request
 
 from bot.db.queries import get_pool, insert_probiv_log
+from bot.services.fns_inn import extract_zags_death
 from bot.services.sauron_api import query_person, split_full_name
 
 SONYA, DRIVER, FINDRE = 111, 139, 1
@@ -149,6 +150,14 @@ async def run(limit: int, apply: bool,
             await asyncio.sleep(PAUSE_SAURON)
             continue
 
+        # Записи ЗАГС берём из того же ответа — бесплатно. Проверка личности
+        # обязательна: в ответе лежат и записи связей, иначе смерть отца
+        # засчиталась бы самому военному.
+        zags = extract_zags_death(res.get("response", {}).get("result", []),
+                                  r["full_name"], bd)
+        cert = max((z[0] for z in zags if z[0]), default=None)
+        death = min((z[1] for z in zags if z[1]), default=None)
+
         dates = {}
         for inn in sorted(inns):
             try:
@@ -162,16 +171,23 @@ async def run(limit: int, apply: bool,
 
         if dates:
             best = max(dates.values())          # берём самую позднюю
-        good = best is not None and best.year in GOOD_YEARS
+        # Проходит по любому из двух признаков: свидетельство о смерти
+        # выдано в рабочем году либо ИНН аннулирован в рабочем году.
+        good = ((cert is not None and cert.year in GOOD_YEARS)
+                or (best is not None and best.year in GOOD_YEARS))
         # ИНН есть, но год не тот — к Драйверу, их перепроверяем бесплатно.
         # ИНН не нашёлся — к Findre: перепроверять нечего, нужен новый
         # платный пробив.
-        owner = SONYA if good else (DRIVER if inns else FINDRE)
+        # К Драйверу — те, кого можно бесплатно перепроверять: есть ИНН
+        # или запись ЗАГС. К Findre — те, по кому у Саурона нет ничего.
+        owner = SONYA if good else (DRIVER if (inns or zags) else FINDRE)
 
         patch = {
             "inn_checked_at": today.isoformat(),
             "inn": ", ".join(sorted(inns)) if inns else "",
             "inn_invalid_date": best.isoformat() if best else "",
+            "cert_date": cert.isoformat() if cert else "",
+            "death_date": death.isoformat() if death else "",
         }
         async with pool.acquire() as conn:
             await conn.execute(
@@ -190,7 +206,7 @@ async def run(limit: int, apply: bool,
 
         mark = "СОНЕ" if good else ("драйверу" if inns else "findre")
         print(f"  [{i}/{len(work)}] id={r['id']:<7} инн:{len(inns)} "
-              f"дата:{best or '—'} → {mark}   ${spent:.2f}")
+              f"загс:{cert or '—'} инн-дата:{best or '—'} → {mark}   ${spent:.2f}")
         await asyncio.sleep(PAUSE_SAURON)
 
     with open(OUT, "a", encoding="utf-8") as f:
