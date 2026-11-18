@@ -130,7 +130,29 @@ async def export_cancel_cb(callback: CallbackQuery):
 
 # ──────────── ОБЩАЯ ЛОГИКА ВЫГРУЗКИ ────────────
 
-async def _do_export(target: Message, manager: dict | None, is_admin: bool, limit: int | None):
+_export_locks: dict = {}
+
+
+async def _do_export(target: Message, manager: dict | None,
+                     is_admin: bool, limit: int | None):
+    """
+    Одна выгрузка на менеджера за раз.
+
+    Раньше защитой от повторной выдачи тех же лидов служила пометка
+    «выгружено» до отправки файла. Это и привело к потере двух партий
+    Леси 18.11.2026: пометка встала, отправка не прошла, байты пропали.
+    Теперь порядок правильный, а от двойного нажатия защищает замок.
+    """
+    key = manager["id"] if manager else 0
+    lock = _export_locks.setdefault(key, asyncio.Lock())
+    if lock.locked():
+        await target.answer("\u23f3 Предыдущая выгрузка ещё готовится, подождите её.")
+        return
+    async with lock:
+        await _do_export_inner(target, manager, is_admin, limit)
+
+
+async def _do_export_inner(target: Message, manager: dict | None, is_admin: bool, limit: int | None):
     """
     Выгрузить лиды в .xlsx и пометить их.
     """
@@ -165,21 +187,53 @@ async def _do_export(target: Message, manager: dict | None, is_admin: bool, limi
 
     filename = make_filename(label)
 
-    # Помечаем как выгруженные ДО отправки —
-    # чтобы при повторном запросе они уже не попали (даже если файл доставится позже)
-    # Флаг "выгружено" ставим только если выгружает менеджер (или пульт)
-    # Админ выгружает "для себя" — без побочных эффектов на статус
+    # Копия на диск до отправки: если доставка не пройдёт, файл можно
+    # отдать руками, не пересобирая из базы.
+    try:
+        with open("/root/exports/" + filename, "wb") as fh:
+            fh.write(xlsx_bytes)
+    except Exception:
+        logger.exception("не удалось сохранить копию выгрузки")
+
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
+
+    # Сначала отправляем. Пометка — только после успешной отправки,
+    # иначе при сбое лиды списаны, а файла у менеджера нет.
+    # Telegram периодически отвечает 500 на sendDocument. Сбой короткий,
+    # поэтому три попытки с нарастающей паузой снимают почти все случаи.
+    err = None
+    for attempt in (1, 2, 3):
+        try:
+            await target.answer_document(
+                BufferedInputFile(xlsx_bytes, filename=filename),
+                caption=(
+                    f"\u2705 Выгружено: *{len(military_records)}* лидов\n"
+                    f"Родственников в файле: *{len(relatives)}*"
+                ),
+                parse_mode="Markdown"
+            )
+            err = None
+            break
+        except Exception as e:
+            err = e
+            logger.warning("выгрузка, попытка %d из 3 не прошла: %s", attempt, e)
+            if attempt < 3:
+                await asyncio.sleep(3 * attempt)
+
+    if err is not None:
+        e = err
+        logger.exception("Не удалось отправить файл выгрузки")
+        await target.answer(
+            "\u274c Файл не отправился, лиды остались доступными для выгрузки.\n"
+            f"Копия лежит на сервере: {filename}\n\n{e}"
+        )
+        return
+
     if not is_admin:
         await mark_military_exported(military_ids)
 
-
-    # Отправляем файл
-    await status_msg.delete()
-    await target.answer_document(
-        BufferedInputFile(xlsx_bytes, filename=filename),
-        caption=(
-            f"✅ Выгружено: *{len(military_records)}* лидов\n"
-            f"Родственников в файле: *{len(relatives)}*"
-        ),
-        parse_mode="Markdown"
-    )
+    logger.info("export: менеджер=%s лидов=%d родни=%d файл=%s",
+                label or "админ", len(military_records), len(relatives), filename)
